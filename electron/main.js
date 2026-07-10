@@ -17,7 +17,9 @@ function createWindow() {
     minWidth: 1050,
     minHeight: 750,
     frame: false,
-    titleBarStyle: 'hidden',
+    // macOS keeps its traffic-light controls when the title bar is hidden.
+    // Use the inset variant and let the renderer reserve room for them.
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,

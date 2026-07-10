@@ -6,6 +6,9 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' http://localhost:5173; script-src 'self' 'unsafe-inline' http://localhost:5173; style-src 'self' 'unsafe-inline'; media-src 'self' file: blob:; connect-src 'self' ws://localhost:5173 http://localhost:5173">
   <title>AI Music Remastering</title>
   <link rel="stylesheet" href="./styles.css">
+  <script>
+    document.documentElement.dataset.platform = window.electronAPI?.platform || 'web';
+  </script>
 </head>
 <body>
   <!-- Top Bar -->

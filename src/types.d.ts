@@ -1,5 +1,6 @@
 // Type declarations for Electron API
 interface ElectronAPI {
+  platform: string;
   selectFile: () => Promise<string | null>;
   selectFiles: () => Promise<string[]>;
   selectDirectory: () => Promise<string | null>;

@@ -100,6 +100,17 @@ body {
   flex-shrink: 0;
 }
 
+/* A hidden macOS title bar still displays the native traffic-light controls.
+   Keep app content out of that reserved area. */
+html[data-platform="darwin"] .top-bar {
+  padding-left: 84px;
+}
+
+/* macOS provides these controls natively, so don't show a duplicate set. */
+html[data-platform="darwin"] .window-controls {
+  display: none;
+}
+
 .top-bar-drag {
   position: absolute;
   top: 0;
