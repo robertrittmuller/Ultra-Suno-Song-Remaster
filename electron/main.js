@@ -77,6 +77,15 @@ ipcMain.handle('select-directory', async () => {
   return result.filePaths[0] || null;
 });
 
+// Build batch output paths in the main process so the native path separator is
+// always used. The renderer runs in a browser context and must not guess it.
+ipcMain.handle('get-batch-output-path', (event, outputDir, baseName) => {
+  if (!outputDir || !baseName) {
+    throw new Error('Output directory and file name are required');
+  }
+  return path.join(outputDir, `${baseName}_mastered.wav`);
+});
+
 // Save file dialog
 ipcMain.handle('save-file', async () => {
   const result = await dialog.showSaveDialog(mainWindow, {

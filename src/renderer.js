@@ -2074,8 +2074,7 @@ batchDom.exportBtn.addEventListener('click', async () => {
 
       // Build output path
       const baseName = item.name.replace(/\.[^.]+$/, '');
-      const sep = (outputDir.endsWith('/') || outputDir.endsWith('\\')) ? '' : '\\';
-      const outputPath = outputDir + sep + baseName + '_mastered.wav';
+      const outputPath = await window.electronAPI.getBatchOutputPath(outputDir, baseName);
 
       await writeFileChunked(outputPath, wavBuffer);
 
