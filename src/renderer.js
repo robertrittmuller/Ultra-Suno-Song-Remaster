@@ -1,6 +1,7 @@
 import { AUDIO_CONSTANTS, validateSettings } from './audioConstants.js';
 import { measureLUFS, calculateNormalizationGain } from './lufs.js';
 import { encodeWAV } from './wavEncoder.js';
+import { createRestoredInputBuffer, repairPrematureEnding } from './audioRestoration.js';
 
 // ─── Settings Persistence ───────────────────────────────────────────────────
 const STORAGE_KEY = 'ai-mastering-settings';
@@ -20,6 +21,9 @@ function saveSettingsToStorage() {
       cutMud: dom.cutMud.checked,
       addAir: dom.addAir.checked,
       tameHarsh: dom.tameHarsh.checked,
+      repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
+      repairPrematureEnding: dom.repairPrematureEnding.checked,
+      repairVocalCrackle: dom.repairVocalCrackle.checked,
       sampleRate: parseInt(dom.sampleRate.value),
       bitDepth: parseInt(dom.bitDepth.value),
       eqLow: parseFloat(dom.eqLow.value),
@@ -48,6 +52,9 @@ function loadSettingsFromStorage() {
     if (s.cutMud !== undefined) dom.cutMud.checked = s.cutMud;
     if (s.addAir !== undefined) dom.addAir.checked = s.addAir;
     if (s.tameHarsh !== undefined) dom.tameHarsh.checked = s.tameHarsh;
+    if (s.repairEdgeArtifacts !== undefined) dom.repairEdgeArtifacts.checked = s.repairEdgeArtifacts;
+    if (s.repairPrematureEnding !== undefined) dom.repairPrematureEnding.checked = s.repairPrematureEnding;
+    if (s.repairVocalCrackle !== undefined) dom.repairVocalCrackle.checked = s.repairVocalCrackle;
 
     // Sliders / selects
     if (s.truePeakCeiling !== undefined) dom.truePeakSlider.value = s.truePeakCeiling;
@@ -98,6 +105,9 @@ function captureState() {
     cutMud: dom.cutMud.checked,
     addAir: dom.addAir.checked,
     tameHarsh: dom.tameHarsh.checked,
+    repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
+    repairPrematureEnding: dom.repairPrematureEnding.checked,
+    repairVocalCrackle: dom.repairVocalCrackle.checked,
     eqLow: parseFloat(dom.eqLow.value),
     eqLowMid: parseFloat(dom.eqLowMid.value),
     eqMid: parseFloat(dom.eqMid.value),
@@ -125,6 +135,9 @@ function applyState(s) {
   dom.cutMud.checked = s.cutMud;
   dom.addAir.checked = s.addAir;
   dom.tameHarsh.checked = s.tameHarsh;
+  dom.repairEdgeArtifacts.checked = s.repairEdgeArtifacts;
+  dom.repairPrematureEnding.checked = s.repairPrematureEnding;
+  dom.repairVocalCrackle.checked = s.repairVocalCrackle;
   dom.eqLow.value = s.eqLow;
   dom.eqLowMid.value = s.eqLowMid;
   dom.eqMid.value = s.eqMid;
@@ -140,6 +153,7 @@ function applyState(s) {
   updateEQ();
   updateAudioChain();
   updateChecklist();
+  updateRestorationPreview();
   refreshFaderFills();
   saveSettingsToStorage();
 }
@@ -161,6 +175,8 @@ const state = {
   file: {
     path: null,
     buffer: null,
+    restorationPreviewBuffer: null,
+    restorationReport: null,
     duration: 0,
     lufs: null,
     normGain: 1.0
@@ -251,6 +267,10 @@ const dom = {
   cutMud: document.getElementById('cutMud'),
   addAir: document.getElementById('addAir'),
   tameHarsh: document.getElementById('tameHarsh'),
+  repairEdgeArtifacts: document.getElementById('repairEdgeArtifacts'),
+  repairPrematureEnding: document.getElementById('repairPrematureEnding'),
+  repairVocalCrackle: document.getElementById('repairVocalCrackle'),
+  restorationStatus: document.getElementById('restorationStatus'),
   sampleRate: document.getElementById('sampleRate'),
   bitDepth: document.getElementById('bitDepth'),
 
@@ -691,6 +711,8 @@ async function loadAudioFile(filePath) {
     const arrayData = await window.electronAPI.readAudioFile(filePath);
     const uint8Array = new Uint8Array(arrayData);
     state.file.buffer = await ctx.decodeAudioData(uint8Array.buffer);
+    state.file.restorationPreviewBuffer = null;
+    state.file.restorationReport = null;
 
     dom.fileMeta.textContent = 'Analyzing loudness...';
     const lufsResult = measureLUFS(state.file.buffer);
@@ -699,6 +721,7 @@ async function loadAudioFile(filePath) {
     state.file.normGain = calculateNormalizationGain(state.file.lufs, targetLufs);
 
     createAudioChain();
+    updateRestorationPreview();
 
     state.file.duration = state.file.buffer.duration;
     dom.durationEl.textContent = formatTime(state.file.duration);
@@ -707,8 +730,6 @@ async function loadAudioFile(filePath) {
     const channels = state.file.buffer.numberOfChannels;
     const lufsDisplay = isFinite(state.file.lufs) ? `${state.file.lufs.toFixed(1)} LUFS` : 'N/A';
     dom.fileMeta.textContent = `${Math.round(sampleRate / 1000)}kHz • ${channels}ch • ${formatTime(state.file.duration)} • ${lufsDisplay}`;
-
-    drawWaveform();
 
     dom.playBtn.disabled = false;
     dom.stopBtn.disabled = false;
@@ -724,9 +745,77 @@ async function loadAudioFile(filePath) {
   }
 }
 
+// ─── Restoration Preview ───────────────────────────────────────────────────
+function getRestorationPreviewSettings() {
+  return {
+    repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
+    repairPrematureEnding: dom.repairPrematureEnding.checked,
+    repairVocalCrackle: dom.repairVocalCrackle.checked
+  };
+}
+
+function getPreviewBuffer() {
+  return state.file.restorationPreviewBuffer || state.file.buffer;
+}
+
+function updateRestorationStatus(settings, report) {
+  if (!dom.restorationStatus) return;
+  const messages = [];
+  if (settings.repairEdgeArtifacts) {
+    messages.push(report.edgeSamples
+      ? `edge: ${Math.round(report.edgeSamples / state.file.buffer.sampleRate * 1000)} ms repaired`
+      : 'edge: no artifact detected');
+  }
+  if (settings.repairPrematureEnding) {
+    messages.push(report.endingRepaired ? 'ending: fade repaired' : 'ending: no cutoff detected');
+  }
+  if (settings.repairVocalCrackle) {
+    messages.push(report.crackleSamples
+      ? `crackle: ${report.crackleSamples} samples repaired`
+      : 'crackle: no impulse noise detected');
+  }
+
+  dom.restorationStatus.textContent = messages.length ? `Preview: ${messages.join(' · ')}` : 'Preview: restoration off';
+  dom.restorationStatus.classList.toggle(
+    'detected',
+    Boolean(report.edgeSamples || report.crackleSamples || report.endingRepaired)
+  );
+}
+
+/** Rebuilds an audition-only copy immediately when restoration changes. */
+function updateRestorationPreview() {
+  if (!state.file.buffer || !state.audio.context) {
+    if (dom.restorationStatus) dom.restorationStatus.textContent = 'Preview: load a file to analyze';
+    return;
+  }
+
+  const settings = getRestorationPreviewSettings();
+  if (!settings.repairEdgeArtifacts && !settings.repairPrematureEnding && !settings.repairVocalCrackle) {
+    state.file.restorationPreviewBuffer = null;
+    state.file.restorationReport = { edgeSamples: 0, crackleSamples: 0, endingRepaired: false };
+    updateRestorationStatus(settings, state.file.restorationReport);
+    drawWaveform();
+    return;
+  }
+
+  const restored = createRestoredInputBuffer(state.audio.context, state.file.buffer, settings);
+  const report = { ...restored.report, endingRepaired: false };
+  if (settings.repairPrematureEnding) {
+    report.endingRepaired = repairPrematureEnding(
+      Array.from({ length: restored.buffer.numberOfChannels }, (_, channel) => restored.buffer.getChannelData(channel)),
+      restored.buffer.sampleRate
+    );
+  }
+  state.file.restorationPreviewBuffer = restored.buffer;
+  state.file.restorationReport = report;
+  updateRestorationStatus(settings, report);
+  drawWaveform();
+}
+
 // ─── Waveform ───────────────────────────────────────────────────────────────
 function drawWaveform() {
-  if (!state.file.buffer || !dom.waveformCanvas) return;
+  const previewBuffer = getPreviewBuffer();
+  if (!previewBuffer || !dom.waveformCanvas) return;
 
   const canvas = dom.waveformCanvas;
   const ctx = canvas.getContext('2d');
@@ -742,7 +831,7 @@ function drawWaveform() {
   ctx.fillStyle = 'rgba(0, 0, 0, 0)';
   ctx.fillRect(0, 0, width, height);
 
-  const data = state.file.buffer.getChannelData(0);
+  const data = previewBuffer.getChannelData(0);
   const step = Math.ceil(data.length / width);
   const amp = height / 2;
 
@@ -776,7 +865,7 @@ function playAudio() {
   stopAudio();
 
   state.audio.sourceNode = state.audio.context.createBufferSource();
-  state.audio.sourceNode.buffer = state.file.buffer;
+  state.audio.sourceNode.buffer = getPreviewBuffer();
 
   connectAudioChain(state.audio.sourceNode);
 
@@ -869,7 +958,7 @@ function seekTo(time) {
     }
 
     state.audio.sourceNode = state.audio.context.createBufferSource();
-    state.audio.sourceNode.buffer = state.file.buffer;
+    state.audio.sourceNode.buffer = getPreviewBuffer();
     connectAudioChain(state.audio.sourceNode);
 
     state.audio.sourceNode.onended = () => {
@@ -1228,7 +1317,11 @@ async function processAudioOffline(settings) {
   const offlineCtx = new OfflineAudioContext(numChannels, outputLength, targetSampleRate);
 
   const source = offlineCtx.createBufferSource();
-  source.buffer = inputBuffer;
+  // Destructive restoration is performed on an export-only copy. This keeps
+  // the loaded source and real-time audition intact while batch and single
+  // exports receive exactly the same analysis-gated treatment.
+  const restoredInput = createRestoredInputBuffer(offlineCtx, inputBuffer, settings);
+  source.buffer = restoredInput.buffer;
 
   // Use shared node factory
   const nodes = createProcessingNodes(offlineCtx);
@@ -1352,6 +1445,15 @@ async function processAudioOffline(settings) {
     }
   }
 
+  // Run this last so a repaired ending reaches digital silence after every
+  // mastering stage. The detector declines naturally decaying or silent tails.
+  if (settings.repairPrematureEnding) {
+    repairPrematureEnding(
+      Array.from({ length: renderedBuffer.numberOfChannels }, (_, channel) => renderedBuffer.getChannelData(channel)),
+      renderedBuffer.sampleRate
+    );
+  }
+
   return renderedBuffer;
 }
 
@@ -1388,6 +1490,9 @@ dom.processBtn.addEventListener('click', async () => {
     cutMud: dom.cutMud.checked,
     addAir: dom.addAir.checked,
     tameHarsh: dom.tameHarsh.checked,
+    repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
+    repairPrematureEnding: dom.repairPrematureEnding.checked,
+    repairVocalCrackle: dom.repairVocalCrackle.checked,
     sampleRate: parseInt(dom.sampleRate.value),
     bitDepth: parseInt(dom.bitDepth.value),
     eqLow: parseFloat(dom.eqLow.value),
@@ -1451,10 +1556,22 @@ function updateChecklist() {
 }
 
 // ─── Settings Change Handlers ───────────────────────────────────────────────
+const restorationControls = [
+  dom.repairEdgeArtifacts,
+  dom.repairPrematureEnding,
+  dom.repairVocalCrackle
+];
+
 [dom.normalizeLoudness, dom.truePeakLimit, dom.cleanLowEnd, dom.glueCompression,
- dom.centerBass, dom.cutMud, dom.addAir, dom.tameHarsh].forEach(el => {
+ dom.centerBass, dom.cutMud, dom.addAir, dom.tameHarsh, dom.repairEdgeArtifacts,
+ dom.repairPrematureEnding, dom.repairVocalCrackle].forEach(el => {
   el.addEventListener('change', () => {
     pushUndo();
+    if (restorationControls.includes(el)) {
+      stopAudio();
+      state.playback.pauseTime = 0;
+      updateRestorationPreview();
+    }
     updateAudioChain();
     updateChecklist();
     saveSettingsToStorage();
@@ -2015,6 +2132,9 @@ batchDom.exportBtn.addEventListener('click', async () => {
     cutMud: dom.cutMud.checked,
     addAir: dom.addAir.checked,
     tameHarsh: dom.tameHarsh.checked,
+    repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
+    repairPrematureEnding: dom.repairPrematureEnding.checked,
+    repairVocalCrackle: dom.repairVocalCrackle.checked,
     sampleRate: parseInt(dom.sampleRate.value),
     bitDepth: parseInt(dom.bitDepth.value),
     eqLow: parseFloat(dom.eqLow.value),
