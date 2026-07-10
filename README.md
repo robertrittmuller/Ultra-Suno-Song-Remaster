@@ -14,6 +14,7 @@ A professional desktop app for mastering AI-generated music to streaming-ready q
 - **5-Band EQ** - Fine-tune with visual faders and presets (Flat, Vocal Boost, Bass Boost, Bright, Warm, AI Fix)
 - **Quick Fix Tools** - Glue compression, clean low end
 - **Polish Effects** - Cut mud, add air, tame harshness
+- **Analysis-Gated Restoration** - Optional stereo-linked boundary declicking, hard-cut ending repair, and quiet-passage decrackling
 - **Real-time Preview** - Hear all changes live before exporting, preview any queued file
 - **Clipping Detection** - Visual CLIP indicators on meters
 - **High-Quality Export** - WAV output at 44.1/48kHz, 16/24-bit with embedded metadata
@@ -33,6 +34,21 @@ Get the latest release for your platform:
 3. Adjust EQ, loudness, and mastering settings
 4. Toggle FX bypass to compare before/after
 5. Click "Export WAV" for a single file
+
+### Restoration
+
+The optional **Restoration** controls apply identically to single-file and
+batch exports. They also create an immediate, non-destructive audition buffer
+in the player and waveform, with a detection result shown in the Restoration
+card. They are off by default, so a source is never altered unexpectedly.
+
+- **Repair Edge Artifacts** detects isolated impulses and short broadband static bursts at either boundary. Bursts are removed only when they are bracketed by silence; isolated impulses are reconstructed with slope-continuous interpolation.
+- **Repair Cutoff Ending** runs only when the last 50 ms is still audible and has not naturally decayed relative to the preceding audio. It applies a shaped 650 ms release that reaches digital silence without a new click.
+- **Repair Quiet Crackle** uses a stereo-linked, locally adaptive impulse detector in low-level passages. It avoids a broad noise gate, preserving vocal consonants and stereo placement.
+
+No restoration process can recreate musical material that is absent after a true
+cut. For that case, the ending repair provides a clean release rather than
+inventing a continuation.
 
 ### Batch Processing
 
