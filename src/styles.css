@@ -638,7 +638,7 @@ html[data-platform="darwin"] .window-controls {
 /* Settings Grid - Row 1 */
 .panel-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
   flex-shrink: 0;
 }
@@ -671,6 +671,19 @@ html[data-platform="darwin"] .window-controls {
   display: flex;
   align-items: center;
   gap: 5px;
+}
+
+.restoration-status {
+  margin-top: 7px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 9px;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+.restoration-status.detected {
+  color: var(--theme-accent);
 }
 
 /* Loudness Card */

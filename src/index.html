@@ -253,6 +253,26 @@
       </div>
 
       <div class="settings-card">
+        <h3>Restoration</h3>
+        <label class="toggle-row" data-tip="Stereo-linked repair of isolated pops plus short broadband static bursts at either boundary when they are bracketed by silence. Audition the repaired buffer before export.">
+          <span>Repair Edge Artifacts</span>
+          <input type="checkbox" id="repairEdgeArtifacts" aria-label="Repair detected audio artifacts at file boundaries">
+          <span class="toggle" aria-hidden="true"></span>
+        </label>
+        <label class="toggle-row" data-tip="Detects an audible, non-decaying hard cutoff and applies a 650 ms shaped release. Naturally faded or silent endings are not changed.">
+          <span>Repair Cutoff Ending</span>
+          <input type="checkbox" id="repairPrematureEnding" aria-label="Repair a detected premature ending with a smooth fade">
+          <span class="toggle" aria-hidden="true"></span>
+        </label>
+        <label class="toggle-row" data-tip="Adaptive decrackling for short impulse noise in quiet passages. Detection is linked across channels to preserve stereo placement; audition it before export.">
+          <span>Repair Quiet Crackle</span>
+          <input type="checkbox" id="repairVocalCrackle" aria-label="Repair detected crackle during quiet vocal passages">
+          <span class="toggle" aria-hidden="true"></span>
+        </label>
+        <div class="restoration-status" id="restorationStatus" role="status" aria-live="polite">Preview: restoration off</div>
+      </div>
+
+      <div class="settings-card">
         <h3>Output</h3>
         <div class="select-row" data-tip="44.1kHz is CD quality and Spotify standard. 48kHz for video.">
           <span>Sample Rate</span>
