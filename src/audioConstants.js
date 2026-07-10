@@ -58,6 +58,11 @@ export const DEFAULT_SETTINGS = {
   cutMud: false,
   addAir: false,
   tameHarsh: false,
+  // Restoration is opt-in: analysis is conservative, but mastering should
+  // never alter a source unless the engineer explicitly enables a treatment.
+  repairEdgeArtifacts: false,
+  repairPrematureEnding: false,
+  repairVocalCrackle: false,
   sampleRate: AUDIO_CONSTANTS.SAMPLE_RATE_44K,
   bitDepth: AUDIO_CONSTANTS.BIT_DEPTH_16,
   eqLow: 0,
