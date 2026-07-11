@@ -6,6 +6,7 @@ interface ElectronAPI {
   selectDirectory: () => Promise<string | null>;
   saveFile: () => Promise<string | null>;
   readAudioFile: (filePath: string) => Promise<number[]>;
+  importSunoStems: (archivePath: string) => Promise<Array<{ name: string; path: string }>>;
   writeFile: (filePath: string, data: number[]) => Promise<{ success: boolean }>;
   getPathForFile: (file: File) => string;
   getSystemInfo: () => Promise<{

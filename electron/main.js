@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { extractSunoStems } = require('./sunoStems');
 
 let mainWindow;
 
@@ -9,6 +10,15 @@ const previewDir = path.join(os.tmpdir(), 'spotify-worthy-preview');
 if (!fs.existsSync(previewDir)) {
   fs.mkdirSync(previewDir, { recursive: true });
 }
+const stemsTempDir = path.join(previewDir, 'stems');
+if (!fs.existsSync(stemsTempDir)) {
+  fs.mkdirSync(stemsTempDir, { recursive: true });
+}
+
+const importFileFilter = {
+  name: 'Audio Files and Suno Stem Archives',
+  extensions: ['mp3', 'wav', 'flac', 'aac', 'm4a', 'mp4', 'zip']
+};
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -55,7 +65,7 @@ ipcMain.handle('window-close', () => mainWindow.close());
 ipcMain.handle('select-file', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile'],
-    filters: [{ name: 'Audio Files', extensions: ['mp3', 'wav', 'flac', 'aac', 'm4a'] }]
+    filters: [importFileFilter]
   });
   return result.filePaths[0] || null;
 });
@@ -64,7 +74,7 @@ ipcMain.handle('select-file', async () => {
 ipcMain.handle('select-files', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile', 'multiSelections'],
-    filters: [{ name: 'Audio Files', extensions: ['mp3', 'wav', 'flac', 'aac', 'm4a'] }]
+    filters: [importFileFilter]
   });
   return result.filePaths || [];
 });
@@ -106,6 +116,15 @@ ipcMain.handle('read-audio-file', async (event, filePath) => {
   } catch (error) {
     throw new Error(`Failed to read file: ${error.message}`);
   }
+});
+
+// Extract a Suno stem export into a private temporary folder. The renderer only
+// receives the resulting audio paths, never direct filesystem access.
+ipcMain.handle('import-suno-stems', async (event, archivePath) => {
+  if (!archivePath || path.extname(archivePath).toLowerCase() !== '.zip' || !fs.existsSync(archivePath)) {
+    throw new Error('Suno stems ZIP not found');
+  }
+  return extractSunoStems(archivePath, stemsTempDir);
 });
 
 // Write file (for WAV export)

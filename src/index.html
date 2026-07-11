@@ -52,9 +52,9 @@
     <div class="file-zone" id="dropZone" role="region" aria-label="Audio file drop zone">
       <div class="file-zone-content" id="fileZoneContent">
         <div class="drop-icon" aria-hidden="true">📁</div>
-        <p>Drop audio file here or</p>
-        <button id="selectFile" class="btn-select" aria-label="Browse for audio files">Browse Files</button>
-        <span class="file-types">MP3, WAV, FLAC, AAC, M4A, MP4</span>
+        <p>Drop an audio file or Suno stems ZIP here, or</p>
+        <button id="selectFile" class="btn-select" aria-label="Browse for audio files or Suno stem archives">Browse Files</button>
+        <span class="file-types">MP3, WAV, FLAC, AAC, M4A, MP4, Suno Stems ZIP</span>
       </div>
       <div class="file-loaded hidden" id="fileLoaded">
         <div class="file-header">
@@ -131,7 +131,7 @@
           <button class="batch-tab" id="tabMeta" role="tab" aria-selected="false" aria-controls="batchTabMeta">🏷️ Metadata</button>
         </div>
         <div class="batch-actions">
-          <button id="batchAddFiles" class="btn-batch" aria-label="Add files to batch queue">+ Add Files</button>
+          <button id="batchAddFiles" class="btn-batch" aria-label="Add audio files or Suno stem archives to batch queue">+ Add Files</button>
           <button id="batchClear" class="btn-batch btn-batch-secondary" aria-label="Clear batch queue" disabled>Clear</button>
           <button id="batchExport" class="btn-batch btn-batch-export" aria-label="Export all files in batch queue" disabled>🚀 Export All</button>
         </div>
@@ -139,8 +139,8 @@
 
       <!-- Queue Tab -->
       <div class="batch-tab-content" id="batchTabQueue" role="tabpanel" aria-labelledby="tabQueue">
-        <div class="batch-drop-zone" id="batchDropZone" role="region" aria-label="Drop audio files here for batch processing">
-          <span class="batch-drop-text">Drop multiple audio files here or click "Add Files"</span>
+        <div class="batch-drop-zone" id="batchDropZone" role="region" aria-label="Drop audio files or Suno stem archives here for batch processing">
+          <span class="batch-drop-text">Drop audio files or a Suno stems ZIP here, or click "Add Files"</span>
         </div>
         <div class="batch-list" id="batchList" role="list" aria-label="Queued files"></div>
         <div class="batch-progress hidden" id="batchProgress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">

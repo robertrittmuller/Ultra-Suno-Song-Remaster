@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getBatchOutputPath: (outputDir, baseName) => ipcRenderer.invoke('get-batch-output-path', outputDir, baseName),
   saveFile: () => ipcRenderer.invoke('save-file'),
   readAudioFile: (filePath) => ipcRenderer.invoke('read-audio-file', filePath),
+  importSunoStems: (archivePath) => ipcRenderer.invoke('import-suno-stems', archivePath),
   writeFile: (filePath, data) => ipcRenderer.invoke('write-file', filePath, data),
   getPathForFile: (file) => webUtils.getPathForFile(file),
   getSystemInfo: () => ipcRenderer.invoke('get-system-info'),

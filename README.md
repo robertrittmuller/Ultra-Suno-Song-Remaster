@@ -6,6 +6,7 @@ A professional desktop app for mastering AI-generated music to streaming-ready q
 ## Features
 
 - **Batch Processing** - Queue multiple files, apply the same settings, and export all at once
+- **Suno Stem ZIP Import** - Load a Suno stem export; its audio stems are extracted into the batch queue and the first stem opens in the player
 - **Metadata Editor** - Add title, artist, album, genre, year, track number, and comments per file
 - **Loudness Normalization** - Adjustable target LUFS (-20 to -6 LUFS)
 - **True Peak Limiting** - Prevents clipping with adjustable ceiling
@@ -29,7 +30,7 @@ Get the latest release for your platform:
 
 ## Usage
 
-1. Drag & drop an audio file (MP3, WAV, FLAC, AAC, M4A)
+1. Drag & drop an audio file (MP3, WAV, FLAC, AAC, M4A, MP4) or a Suno stems ZIP
 2. Preview with the built-in player
 3. Adjust EQ, loudness, and mastering settings
 4. Toggle FX bypass to compare before/after
@@ -52,7 +53,7 @@ inventing a continuation.
 
 ### Batch Processing
 
-1. Click "+ Add Files" or drag multiple files into the batch queue
+1. Click "+ Add Files" or drag audio files and Suno stems ZIPs into the batch queue
 2. Preview any queued file by clicking the ▶ button to load it into the player
 3. Switch to the "Metadata" tab to add tags (title, artist, album, etc.) per file
 4. Use "Apply to All" to copy metadata across the entire queue

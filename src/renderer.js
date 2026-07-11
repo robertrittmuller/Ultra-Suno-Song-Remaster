@@ -704,6 +704,34 @@ document.querySelectorAll('.preset-btn').forEach(btn => {
 });
 
 // ─── File Loading ───────────────────────────────────────────────────────────
+const AUDIO_FILE_PATTERN = /\.(mp3|wav|flac|aac|m4a|mp4)$/i;
+const SUNO_STEMS_ARCHIVE_PATTERN = /\.zip$/i;
+
+function showFileStatus(message, type = 'success') {
+  dom.statusMessage.textContent = message;
+  dom.statusMessage.className = `status-message ${type} visible`;
+  setTimeout(() => dom.statusMessage.classList.remove('visible'), 6000);
+}
+
+async function importSunoStemsArchive(archivePath, loadFirstStem = false) {
+  try {
+    const stems = await window.electronAPI.importSunoStems(archivePath);
+    const stemPaths = stems.map(stem => stem.path);
+    if (stemPaths.length === 0) throw new Error('No supported audio stems were found in this ZIP.');
+
+    await addFilesToBatch(stemPaths);
+    if (loadFirstStem) await loadFile(stemPaths[0]);
+
+    const archiveName = archivePath.split(/[\\/]/).pop();
+    showFileStatus(`✓ Imported ${stemPaths.length} stems from ${archiveName}.`, 'success');
+    return stemPaths;
+  } catch (error) {
+    console.error('Error importing Suno stems:', error);
+    showFileStatus(`✗ Could not import Suno stems: ${error.message}`, 'error');
+    return [];
+  }
+}
+
 async function loadAudioFile(filePath) {
   const ctx = initAudioContext();
 
@@ -1227,6 +1255,10 @@ dom.changeFileBtn.addEventListener('click', async () => {
 async function loadFile(filePath) {
   if (!filePath) return;
 
+  if (SUNO_STEMS_ARCHIVE_PATTERN.test(filePath)) {
+    return importSunoStemsArchive(filePath, true);
+  }
+
   state.file.path = filePath;
 
   try {
@@ -1265,13 +1297,15 @@ dom.dropZone.addEventListener('drop', async (e) => {
   dom.dropZone.classList.remove('drag-over');
 
   const file = e.dataTransfer.files[0];
-  if (file && /\.(mp3|wav|flac|aac|m4a)$/i.test(file.name)) {
+  if (file && (AUDIO_FILE_PATTERN.test(file.name) || SUNO_STEMS_ARCHIVE_PATTERN.test(file.name))) {
     const filePath = window.electronAPI.getPathForFile(file);
     if (filePath) {
       stopAudio();
       state.playback.pauseTime = 0;
       await loadFile(filePath);
     }
+  } else {
+    showFileStatus('✗ Please drop an audio file or a Suno stems ZIP.', 'error');
   }
 });
 
@@ -2044,20 +2078,43 @@ function renderBatchList() {
   });
 }
 
-function addFilesToBatch(filePaths) {
+async function addFilesToBatch(filePaths) {
+  const expandedPaths = [];
+  let importedArchives = 0;
+  try {
+    for (const filePath of filePaths) {
+      if (SUNO_STEMS_ARCHIVE_PATTERN.test(filePath)) {
+        const stems = await window.electronAPI.importSunoStems(filePath);
+        expandedPaths.push(...stems.map(stem => stem.path));
+        importedArchives++;
+      } else if (AUDIO_FILE_PATTERN.test(filePath)) {
+        expandedPaths.push(filePath);
+      }
+    }
+  } catch (error) {
+    console.error('Error importing Suno stems for batch:', error);
+    showFileStatus(`✗ Could not import Suno stems: ${error.message}`, 'error');
+    return;
+  }
+
   const existing = new Set(batchState.queue.map(q => q.path));
-  for (const fp of filePaths) {
+  for (const fp of expandedPaths) {
     if (existing.has(fp)) continue;
     const name = fp.split(/[\\/]/).pop();
     batchState.queue.push({ path: fp, name, status: 'pending' });
+    existing.add(fp);
   }
   renderBatchList();
   updateBatchButtons();
+
+  if (importedArchives) {
+    showFileStatus(`✓ Added stems from ${importedArchives} Suno ZIP archive${importedArchives === 1 ? '' : 's'} to the batch queue.`, 'success');
+  }
 }
 
 batchDom.addBtn.addEventListener('click', async () => {
   const files = await window.electronAPI.selectFiles();
-  if (files.length) addFilesToBatch(files);
+  if (files.length) await addFilesToBatch(files);
 });
 
 batchDom.clearBtn.addEventListener('click', () => {
@@ -2070,7 +2127,7 @@ batchDom.clearBtn.addEventListener('click', () => {
 
 batchDom.dropZone.addEventListener('click', async () => {
   const files = await window.electronAPI.selectFiles();
-  if (files.length) addFilesToBatch(files);
+  if (files.length) await addFilesToBatch(files);
 });
 
 batchDom.dropZone.addEventListener('dragover', (e) => {
@@ -2082,12 +2139,12 @@ batchDom.dropZone.addEventListener('dragleave', () => {
   batchDom.dropZone.classList.remove('drag-over');
 });
 
-batchDom.dropZone.addEventListener('drop', (e) => {
+batchDom.dropZone.addEventListener('drop', async (e) => {
   e.preventDefault();
   batchDom.dropZone.classList.remove('drag-over');
-  const files = [...e.dataTransfer.files].filter(f => /\.(mp3|wav|flac|aac|m4a)$/i.test(f.name));
+  const files = [...e.dataTransfer.files].filter(f => AUDIO_FILE_PATTERN.test(f.name) || SUNO_STEMS_ARCHIVE_PATTERN.test(f.name));
   const paths = files.map(f => window.electronAPI.getPathForFile(f)).filter(Boolean);
-  if (paths.length) addFilesToBatch(paths);
+  if (paths.length) await addFilesToBatch(paths);
 });
 
 // Helper: yield to the event loop so the UI can repaint
