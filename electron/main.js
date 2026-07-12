@@ -112,7 +112,7 @@ ipcMain.handle('read-audio-file', async (event, filePath) => {
   
   try {
     const buffer = fs.readFileSync(filePath);
-    return Array.from(new Uint8Array(buffer));
+    return new Uint8Array(buffer);
   } catch (error) {
     throw new Error(`Failed to read file: ${error.message}`);
   }
