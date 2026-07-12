@@ -188,6 +188,8 @@ const state = {
     stemSourceNodes: [],
     stemNodeControls: new Map(),
     stemMixBus: null,
+    masterRestorationDelta: null,
+    restorationPreviewRequest: 0,
     analyser: null,
     analyserLeft: null,
     analyserRight: null,
@@ -1097,6 +1099,91 @@ function updateRestorationPreview() {
   drawWaveform();
 }
 
+function removeLiveMasterRestoration(fade = true) {
+  const active = state.audio.masterRestorationDelta;
+  if (!active) return;
+
+  state.audio.masterRestorationDelta = null;
+  const now = state.audio.context?.currentTime || 0;
+  try {
+    active.gain.gain.cancelScheduledValues(now);
+    active.gain.gain.setValueAtTime(active.gain.gain.value, now);
+    active.gain.gain.linearRampToValueAtTime(0, now + (fade ? 0.025 : 0));
+    setTimeout(() => {
+      try {
+        active.source.stop();
+        active.source.disconnect();
+        active.gain.disconnect();
+      } catch (e) { /* already stopped */ }
+    }, fade ? 40 : 0);
+  } catch (e) { /* audio context was already closed */ }
+}
+
+function createMasterRestorationDelta(buffer, settings) {
+  const context = state.audio.context;
+  const restored = createRestoredInputBuffer(context, buffer, settings);
+  const report = { ...restored.report, endingRepaired: false };
+  if (settings.repairPrematureEnding) {
+    report.endingRepaired = repairPrematureEnding(
+      Array.from({ length: restored.buffer.numberOfChannels }, (_, channel) => restored.buffer.getChannelData(channel)),
+      restored.buffer.sampleRate
+    );
+  }
+
+  const delta = context.createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
+  for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+    const original = buffer.getChannelData(channel);
+    const repaired = restored.buffer.getChannelData(channel);
+    const difference = delta.getChannelData(channel);
+    for (let index = 0; index < difference.length; index++) {
+      difference[index] = repaired[index] - original[index];
+    }
+  }
+  return { delta, report };
+}
+
+async function updateLiveMasterRestorationPreview() {
+  const song = state.file.stemSong;
+  if (!song || !state.playback.isPlaying || !state.audio.stemMixBus) return;
+
+  const settings = getRestorationPreviewSettings();
+  const request = ++state.audio.restorationPreviewRequest;
+  if (!settings.repairEdgeArtifacts && !settings.repairPrematureEnding && !settings.repairVocalCrackle) {
+    removeLiveMasterRestoration();
+    updateRestorationStatus(settings, { edgeSamples: 0, crackleSamples: 0, endingRepaired: false });
+    return;
+  }
+
+  removeLiveMasterRestoration(false);
+  if (dom.restorationStatus) dom.restorationStatus.textContent = 'Preview: preparing live restoration…';
+  await yieldToUI();
+
+  // This is a correction layer: repaired mix minus original mix. It is added
+  // before the song master bus, so live stem gain/pan changes remain intact.
+  const { delta, report } = createMasterRestorationDelta(state.file.buffer, settings);
+  if (request !== state.audio.restorationPreviewRequest ||
+      state.file.stemSong !== song ||
+      !state.playback.isPlaying ||
+      !state.audio.stemMixBus) return;
+
+  const context = state.audio.context;
+  const offset = Math.max(0, context.currentTime - state.playback.startTime);
+  if (offset >= delta.duration) return;
+  const source = context.createBufferSource();
+  const gain = context.createGain();
+  source.buffer = delta;
+  gain.gain.value = 0;
+  source.connect(gain).connect(state.audio.stemMixBus);
+  source.start(0, offset);
+  gain.gain.linearRampToValueAtTime(1, context.currentTime + 0.025);
+  const active = { source, gain };
+  state.audio.masterRestorationDelta = active;
+  source.onended = () => {
+    if (state.audio.masterRestorationDelta === active) state.audio.masterRestorationDelta = null;
+  };
+  updateRestorationStatus(settings, report);
+}
+
 // ─── Waveform ───────────────────────────────────────────────────────────────
 function drawWaveform() {
   const previewBuffer = getPreviewBuffer();
@@ -1161,12 +1248,10 @@ function startSingleSourcePlayback(offset) {
 }
 
 function getStemLivePlaybackBuffer(context, stem) {
-  const settings = {
-    ...stem.settings,
-    repairEdgeArtifacts: dom.repairEdgeArtifacts.checked || stem.settings.repairEdgeArtifacts,
-    repairPrematureEnding: dom.repairPrematureEnding.checked || stem.settings.repairPrematureEnding,
-    repairVocalCrackle: dom.repairVocalCrackle.checked || stem.settings.repairVocalCrackle
-  };
+  // Song restoration is a post-mix treatment. Applying it to each live stem
+  // changes the balance and can make a repair detector mistake musical detail
+  // for an artifact. Only explicit per-stem restoration belongs in this path.
+  const settings = stem.settings;
   const needsRestoration = settings.repairEdgeArtifacts ||
     settings.repairPrematureEnding || settings.repairVocalCrackle;
   if (!needsRestoration) return stem.buffer;
@@ -1221,6 +1306,7 @@ function startPlaybackAt(offset) {
   state.playback.startTime = state.audio.context.currentTime - offset;
   state.playback.isPlaying = true;
   dom.playIcon.textContent = '⏸';
+  if (liveStems) void updateLiveMasterRestorationPreview();
   startLevelMeters();
   startSeekUpdate();
   startSpectrogram();
@@ -1239,6 +1325,8 @@ function pauseAudio() {
 }
 
 function stopAudio() {
+  state.audio.restorationPreviewRequest++;
+  removeLiveMasterRestoration(false);
   if (state.audio.sourceNode) {
     try {
       state.audio.sourceNode.onended = null;
@@ -1898,9 +1986,13 @@ const restorationControls = [
   el.addEventListener('change', () => {
     pushUndo();
     if (restorationControls.includes(el)) {
-      stopAudio();
-      state.playback.pauseTime = 0;
-      updateRestorationPreview();
+      if (state.file.stemSong && state.playback.isPlaying) {
+        void updateLiveMasterRestorationPreview();
+      } else {
+        stopAudio();
+        state.playback.pauseTime = 0;
+        updateRestorationPreview();
+      }
     }
     updateAudioChain();
     updateChecklist();
