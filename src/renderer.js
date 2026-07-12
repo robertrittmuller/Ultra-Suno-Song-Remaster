@@ -185,6 +185,9 @@ const state = {
   audio: {
     context: null,
     sourceNode: null,
+    stemSourceNodes: [],
+    stemNodeControls: new Map(),
+    stemMixBus: null,
     analyser: null,
     analyserLeft: null,
     analyserRight: null,
@@ -872,6 +875,40 @@ function connectStemProcessingChain(context, source, stem, audible, destination)
   const panner = context.createStereoPanner();
   panner.pan.value = settings.pan / 100;
   merger.connect(panner).connect(destination);
+
+  return { gain, highpass, eqNodes, mud, harsh, harshHigh, air, compressor, side, panner };
+}
+
+function stemIsAudible(song, stem) {
+  const hasSolo = song.stems.some(candidate => candidate.settings.solo);
+  return !stem.settings.mute && (!hasSolo || stem.settings.solo);
+}
+
+function updateLiveStemSettings(song) {
+  if (state.file.stemSong !== song || state.audio.stemNodeControls.size === 0) return;
+  const now = state.audio.context.currentTime;
+  for (const stem of song.stems) {
+    const nodes = state.audio.stemNodeControls.get(stem);
+    if (!nodes) continue;
+    const settings = stem.settings;
+    nodes.gain.gain.setTargetAtTime(
+      stemIsAudible(song, stem) ? Math.pow(10, settings.gainDb / 20) : 0,
+      now,
+      0.012
+    );
+    nodes.panner.pan.setTargetAtTime(settings.pan / 100, now, 0.012);
+    nodes.side.gain.setTargetAtTime(settings.width / 100, now, 0.012);
+    nodes.highpass.frequency.setTargetAtTime(settings.cleanLowEnd ? AUDIO_CONSTANTS.HIGHPASS_FREQ : 1, now, 0.012);
+    nodes.eqNodes.forEach((node, index) => {
+      node.gain.setTargetAtTime([settings.eqLow, settings.eqLowMid, settings.eqMid, settings.eqHighMid, settings.eqHigh][index], now, 0.012);
+    });
+    nodes.mud.gain.setTargetAtTime(settings.cutMud ? -3 : 0, now, 0.012);
+    nodes.harsh.gain.setTargetAtTime(settings.tameHarsh ? AUDIO_CONSTANTS.HARSHNESS_GAIN_4K : 0, now, 0.012);
+    nodes.harshHigh.gain.setTargetAtTime(settings.tameHarsh ? AUDIO_CONSTANTS.HARSHNESS_GAIN_6K : 0, now, 0.012);
+    nodes.air.gain.setTargetAtTime(settings.addAir ? 2.5 : 0, now, 0.012);
+    nodes.compressor.threshold.setTargetAtTime(settings.glueCompression ? AUDIO_CONSTANTS.GLUE_THRESHOLD : 0, now, 0.012);
+    nodes.compressor.ratio.setTargetAtTime(settings.glueCompression ? AUDIO_CONSTANTS.GLUE_RATIO : 1, now, 0.012);
+  }
 }
 
 async function renderStemSongMix(song, sampleRate = null) {
@@ -879,8 +916,6 @@ async function renderStemSongMix(song, sampleRate = null) {
   const rate = sampleRate || Math.max(...song.stems.map(stem => stem.buffer.sampleRate));
   const duration = Math.max(...song.stems.map(stem => stem.buffer.duration));
   const context = new OfflineAudioContext(2, Math.ceil(duration * rate), rate);
-  const hasSolo = song.stems.some(stem => stem.settings.solo);
-
   for (const stem of song.stems) {
     const source = context.createBufferSource();
     const needsRestoration = stem.settings.repairEdgeArtifacts ||
@@ -897,7 +932,7 @@ async function renderStemSongMix(song, sampleRate = null) {
     } else {
       source.buffer = stem.buffer;
     }
-    const audible = !stem.settings.mute && (!hasSolo || stem.settings.solo);
+    const audible = stemIsAudible(song, stem);
     connectStemProcessingChain(context, source, stem, audible, context.destination);
     source.start(0);
   }
@@ -945,38 +980,12 @@ async function loadStemSong(song) {
   drawWaveform();
 }
 
-let stemMixTimer = null;
-let stemMixInProgress = false;
-let pendingStemMix = null;
 function scheduleStemSongMix(song) {
-  pendingStemMix = song;
-  clearTimeout(stemMixTimer);
-  stemMixTimer = setTimeout(async () => {
-    if (stemMixInProgress) return;
-    const requestedSong = pendingStemMix;
-    pendingStemMix = null;
-    if (state.file.stemSong !== requestedSong) return;
-    stemMixInProgress = true;
-    const wasPlaying = state.playback.isPlaying;
-    const position = wasPlaying
-      ? state.audio.context.currentTime - state.playback.startTime
-      : state.playback.pauseTime;
-    stopAudio();
-    dom.fileMeta.textContent = 'Updating stem mix...';
-    try {
-      const mix = await renderStemSongMix(requestedSong);
-      if (state.file.stemSong !== requestedSong) return;
-      await activateAudioBuffer(mix, `${requestedSong.stems.length} stems`);
-      state.playback.pauseTime = Math.min(position, state.file.duration);
-      drawWaveform();
-      if (wasPlaying) playAudio();
-    } catch (error) {
-      showFileStatus(`✗ Could not update stem mix: ${error.message}`, 'error');
-    } finally {
-      stemMixInProgress = false;
-      if (pendingStemMix) scheduleStemSongMix(pendingStemMix);
-    }
-  }, 180);
+  // Gain and pan must remain click-free while the user auditions the song.
+  // Rebuilding a five-minute multitrack render and measuring LUFS on every
+  // slider move competes with real-time playback, so defer that work until
+  // export (which always renders the current stem settings from source).
+  song.mixDirty = true;
 }
 
 async function importSunoStemsArchive(archivePath, loadSong = false) {
@@ -1131,37 +1140,96 @@ function drawWaveform() {
 }
 
 // ─── Playback ───────────────────────────────────────────────────────────────
-function playAudio() {
-  if (!state.file.buffer || !state.audio.context) return;
+function finishPlayback() {
+  if (!state.playback.isPlaying) return;
+  state.playback.isPlaying = false;
+  state.playback.pauseTime = 0;
+  dom.playIcon.textContent = '▶';
+  dom.waveformProgress.style.width = '0%';
+  dom.currentTimeEl.textContent = '0:00';
+  clearInterval(state.playback.seekInterval);
+  stopLevelMeters();
+}
 
-  if (state.audio.context.state === 'suspended') {
-    state.audio.context.resume();
-  }
-
-  stopAudio();
-
+function startSingleSourcePlayback(offset) {
   state.audio.sourceNode = state.audio.context.createBufferSource();
   state.audio.sourceNode.buffer = getPreviewBuffer();
-
   connectAudioChain(state.audio.sourceNode);
-
-  state.audio.sourceNode.onended = () => {
-    if (state.playback.isPlaying) {
-      state.playback.isPlaying = false;
-      dom.playIcon.textContent = '▶';
-      clearInterval(state.playback.seekInterval);
-    }
-  };
-
-  const offset = state.playback.pauseTime;
-  state.playback.startTime = state.audio.context.currentTime - offset;
+  state.audio.sourceNode.onended = finishPlayback;
   state.audio.sourceNode.start(0, offset);
+  return true;
+}
+
+function getStemLivePlaybackBuffer(context, stem) {
+  const settings = {
+    ...stem.settings,
+    repairEdgeArtifacts: dom.repairEdgeArtifacts.checked || stem.settings.repairEdgeArtifacts,
+    repairPrematureEnding: dom.repairPrematureEnding.checked || stem.settings.repairPrematureEnding,
+    repairVocalCrackle: dom.repairVocalCrackle.checked || stem.settings.repairVocalCrackle
+  };
+  const needsRestoration = settings.repairEdgeArtifacts ||
+    settings.repairPrematureEnding || settings.repairVocalCrackle;
+  if (!needsRestoration) return stem.buffer;
+
+  const restored = createRestoredInputBuffer(context, stem.buffer, settings);
+  if (settings.repairPrematureEnding) {
+    repairPrematureEnding(
+      Array.from({ length: restored.buffer.numberOfChannels }, (_, channel) => restored.buffer.getChannelData(channel)),
+      restored.buffer.sampleRate
+    );
+  }
+  return restored.buffer;
+}
+
+function startLiveStemPlayback(offset) {
+  const song = state.file.stemSong;
+  if (!song || !song.stems.every(stem => stem.buffer)) return false;
+
+  const context = state.audio.context;
+  const mixBus = context.createGain();
+  state.audio.stemMixBus = mixBus;
+  state.audio.stemSourceNodes = [];
+  state.audio.stemNodeControls.clear();
+  connectAudioChain(mixBus);
+
+  let remaining = 0;
+  for (const stem of song.stems) {
+    if (offset >= stem.buffer.duration) continue;
+    const source = context.createBufferSource();
+    source.buffer = getStemLivePlaybackBuffer(context, stem);
+    const controls = connectStemProcessingChain(context, source, stem, stemIsAudible(song, stem), mixBus);
+    state.audio.stemNodeControls.set(stem, controls);
+    state.audio.stemSourceNodes.push(source);
+    remaining++;
+    source.onended = () => {
+      remaining--;
+      if (remaining === 0) finishPlayback();
+    };
+    source.start(0, offset);
+  }
+  return remaining > 0;
+}
+
+function startPlaybackAt(offset) {
+  if (!state.file.buffer || !state.audio.context) return;
+  if (state.audio.context.state === 'suspended') state.audio.context.resume();
+
+  const liveStems = state.file.stemSong;
+  const started = liveStems ? startLiveStemPlayback(offset) : startSingleSourcePlayback(offset);
+  if (!started) return;
+
+  state.playback.startTime = state.audio.context.currentTime - offset;
   state.playback.isPlaying = true;
   dom.playIcon.textContent = '⏸';
-
   startLevelMeters();
   startSeekUpdate();
   startSpectrogram();
+}
+
+function playAudio() {
+  if (!state.file.buffer || !state.audio.context) return;
+  stopAudio();
+  startPlaybackAt(state.playback.pauseTime);
 }
 
 function pauseAudio() {
@@ -1178,6 +1246,19 @@ function stopAudio() {
       state.audio.sourceNode.disconnect();
     } catch (e) { /* already stopped */ }
     state.audio.sourceNode = null;
+  }
+  state.audio.stemSourceNodes.forEach(source => {
+    try {
+      source.onended = null;
+      source.stop();
+      source.disconnect();
+    } catch (e) { /* already stopped */ }
+  });
+  state.audio.stemSourceNodes = [];
+  state.audio.stemNodeControls.clear();
+  if (state.audio.stemMixBus) {
+    try { state.audio.stemMixBus.disconnect(); } catch (e) { /* already disconnected */ }
+    state.audio.stemMixBus = null;
   }
   state.playback.isPlaying = false;
   dom.playIcon.textContent = '▶';
@@ -1218,44 +1299,8 @@ function seekTo(time) {
   dom.waveformProgress.style.width = `${progress}%`;
 
   if (wasPlaying) {
-    if (state.audio.sourceNode) {
-      try {
-        state.audio.sourceNode.onended = null;
-        state.audio.sourceNode.stop();
-        state.audio.sourceNode.disconnect();
-      } catch (e) { /* already stopped */ }
-      state.audio.sourceNode = null;
-    }
-    clearInterval(state.playback.seekInterval);
-    stopLevelMeters();
-
-    if (state.audio.context.state === 'suspended') {
-      state.audio.context.resume();
-    }
-
-    state.audio.sourceNode = state.audio.context.createBufferSource();
-    state.audio.sourceNode.buffer = getPreviewBuffer();
-    connectAudioChain(state.audio.sourceNode);
-
-    state.audio.sourceNode.onended = () => {
-      if (state.playback.isPlaying && !state.playback.isSeeking) {
-        state.playback.isPlaying = false;
-        state.playback.pauseTime = 0;
-        dom.playIcon.textContent = '▶';
-        dom.waveformProgress.style.width = '0%';
-        dom.currentTimeEl.textContent = '0:00';
-        clearInterval(state.playback.seekInterval);
-        stopLevelMeters();
-      }
-    };
-
-    state.playback.startTime = state.audio.context.currentTime - time;
-    state.audio.sourceNode.start(0, time);
-    state.playback.isPlaying = true;
-
-    startLevelMeters();
-    startSeekUpdate();
-    startSpectrogram();
+    stopAudio();
+    startPlaybackAt(time);
   }
 
   // Clear seeking flag after a short delay to avoid race conditions
@@ -2361,6 +2406,7 @@ function renderStemEditor() {
         const suffix = key === 'width' ? '%' : key === 'pan' ? '' : ' dB';
         output.textContent = `${input.value}${suffix}`;
       }
+      updateLiveStemSettings(song);
       scheduleStemSongMix(song);
     });
   });
@@ -2372,6 +2418,7 @@ function renderStemEditor() {
   batchDom.stemEditor.querySelector('[data-stem-editor-action="reset"]').addEventListener('click', () => {
     const { mute, solo } = stem.settings;
     stem.settings = { ...createDefaultStemSettings(), mute, solo };
+    updateLiveStemSettings(song);
     renderStemEditor();
     renderBatchList();
     scheduleStemSongMix(song);
@@ -2468,6 +2515,7 @@ function renderBatchList() {
       } else {
         const key = button.dataset.stemAction;
         song.stems[stemIndex].settings[key] = !song.stems[stemIndex].settings[key];
+        updateLiveStemSettings(song);
         scheduleStemSongMix(song);
       }
       renderBatchList();
@@ -2482,6 +2530,7 @@ function renderBatchList() {
       stem.settings[input.dataset.stemSetting] = parseFloat(input.value);
       const output = input.parentElement.querySelector('output');
       output.textContent = input.dataset.stemSetting === 'gainDb' ? `${input.value} dB` : input.value;
+      updateLiveStemSettings(song);
       scheduleStemSongMix(song);
     });
   });
