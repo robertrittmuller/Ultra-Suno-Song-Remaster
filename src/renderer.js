@@ -175,6 +175,7 @@ const state = {
   file: {
     path: null,
     buffer: null,
+    stemSong: null,
     restorationPreviewBuffer: null,
     restorationReport: null,
     duration: 0,
@@ -713,18 +714,288 @@ function showFileStatus(message, type = 'success') {
   setTimeout(() => dom.statusMessage.classList.remove('visible'), 6000);
 }
 
-async function importSunoStemsArchive(archivePath, loadFirstStem = false) {
+function createDefaultStemSettings() {
+  return {
+    gainDb: 0,
+    pan: 0,
+    width: 100,
+    mute: false,
+    solo: false,
+    cleanLowEnd: false,
+    glueCompression: false,
+    cutMud: false,
+    addAir: false,
+    tameHarsh: false,
+    repairEdgeArtifacts: false,
+    repairPrematureEnding: false,
+    repairVocalCrackle: false,
+    eqLow: 0,
+    eqLowMid: 0,
+    eqMid: 0,
+    eqHighMid: 0,
+    eqHigh: 0
+  };
+}
+
+function getStemSongName(archivePath) {
+  return archivePath.split(/[\\/]/).pop()
+    .replace(/\.zip$/i, '')
+    .replace(/\s+stems?$/i, '') || 'Suno Stem Song';
+}
+
+function createStemSong(archivePath, extractedStems) {
+  return {
+    type: 'stem-song',
+    path: `stem-song:${archivePath}`,
+    archivePath,
+    name: getStemSongName(archivePath),
+    status: 'pending',
+    expanded: false,
+    selectedStemIndex: -1,
+    metadata: null,
+    stems: extractedStems.map(stem => ({
+      ...stem,
+      buffer: null,
+      settings: createDefaultStemSettings()
+    }))
+  };
+}
+
+async function decodeAudioPath(filePath, context = initAudioContext()) {
+  const arrayData = await window.electronAPI.readAudioFile(filePath);
+  const bytes = new Uint8Array(arrayData);
+  const audioData = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return context.decodeAudioData(audioData);
+}
+
+async function ensureStemBuffers(song) {
+  const context = initAudioContext();
+  for (let index = 0; index < song.stems.length; index++) {
+    const stem = song.stems[index];
+    if (stem.buffer) continue;
+    if (state.file.stemSong === song) {
+      dom.fileMeta.textContent = `Loading stem ${index + 1}/${song.stems.length}: ${stem.name}`;
+    }
+    stem.buffer = await decodeAudioPath(stem.path, context);
+    await yieldToUI();
+  }
+}
+
+function connectStemProcessingChain(context, source, stem, audible, destination) {
+  const settings = stem.settings;
+  const gain = context.createGain();
+  gain.gain.value = audible ? Math.pow(10, settings.gainDb / 20) : 0;
+
+  const highpass = context.createBiquadFilter();
+  highpass.type = 'highpass';
+  highpass.frequency.value = settings.cleanLowEnd ? AUDIO_CONSTANTS.HIGHPASS_FREQ : 1;
+  highpass.Q.value = 0.7;
+
+  const eqSettings = [
+    ['lowshelf', AUDIO_CONSTANTS.FREQ_LOW, settings.eqLow, 1],
+    ['peaking', AUDIO_CONSTANTS.FREQ_LOW_MID, settings.eqLowMid, 1],
+    ['peaking', AUDIO_CONSTANTS.FREQ_MID, settings.eqMid, 1],
+    ['peaking', AUDIO_CONSTANTS.FREQ_HIGH_MID, settings.eqHighMid, 1],
+    ['highshelf', AUDIO_CONSTANTS.FREQ_HIGH, settings.eqHigh, 1]
+  ];
+  const eqNodes = eqSettings.map(([type, frequency, value, q]) => {
+    const node = context.createBiquadFilter();
+    node.type = type;
+    node.frequency.value = frequency;
+    node.gain.value = value;
+    node.Q.value = q;
+    return node;
+  });
+
+  const mud = context.createBiquadFilter();
+  mud.type = 'peaking';
+  mud.frequency.value = AUDIO_CONSTANTS.MUD_CUT_FREQ;
+  mud.Q.value = 1.5;
+  mud.gain.value = settings.cutMud ? -3 : 0;
+
+  const harsh = context.createBiquadFilter();
+  harsh.type = 'peaking';
+  harsh.frequency.value = AUDIO_CONSTANTS.HARSHNESS_FREQ_1;
+  harsh.Q.value = AUDIO_CONSTANTS.HARSHNESS_Q_4K;
+  harsh.gain.value = settings.tameHarsh ? AUDIO_CONSTANTS.HARSHNESS_GAIN_4K : 0;
+
+  const harshHigh = context.createBiquadFilter();
+  harshHigh.type = 'peaking';
+  harshHigh.frequency.value = AUDIO_CONSTANTS.HARSHNESS_FREQ_2;
+  harshHigh.Q.value = AUDIO_CONSTANTS.HARSHNESS_Q_6K;
+  harshHigh.gain.value = settings.tameHarsh ? AUDIO_CONSTANTS.HARSHNESS_GAIN_6K : 0;
+
+  const air = context.createBiquadFilter();
+  air.type = 'highshelf';
+  air.frequency.value = AUDIO_CONSTANTS.AIR_FREQ;
+  air.gain.value = settings.addAir ? 2.5 : 0;
+
+  const compressor = context.createDynamicsCompressor();
+  compressor.threshold.value = settings.glueCompression ? AUDIO_CONSTANTS.GLUE_THRESHOLD : 0;
+  compressor.ratio.value = settings.glueCompression ? AUDIO_CONSTANTS.GLUE_RATIO : 1;
+  compressor.attack.value = AUDIO_CONSTANTS.GLUE_ATTACK;
+  compressor.release.value = AUDIO_CONSTANTS.GLUE_RELEASE;
+
+  let current = source.connect(gain).connect(highpass);
+  for (const eq of eqNodes) current = current.connect(eq);
+  current = current.connect(mud).connect(harsh).connect(harshHigh).connect(air).connect(compressor);
+
+  const splitter = context.createChannelSplitter(2);
+  const merger = context.createChannelMerger(2);
+  const mid = context.createGain();
+  const side = context.createGain();
+  const leftMid = context.createGain();
+  const rightMid = context.createGain();
+  const leftSide = context.createGain();
+  const rightSide = context.createGain();
+  leftMid.gain.value = rightMid.gain.value = leftSide.gain.value = 0.5;
+  rightSide.gain.value = -0.5;
+  mid.gain.value = 1;
+  side.gain.value = settings.width / 100;
+
+  current.connect(splitter);
+  splitter.connect(leftMid, 0).connect(mid);
+  splitter.connect(rightMid, 1).connect(mid);
+  splitter.connect(leftSide, 0).connect(side);
+  splitter.connect(rightSide, 1).connect(side);
+
+  const midLeft = context.createGain();
+  const midRight = context.createGain();
+  const sideLeft = context.createGain();
+  const sideRight = context.createGain();
+  sideRight.gain.value = -1;
+  mid.connect(midLeft).connect(merger, 0, 0);
+  mid.connect(midRight).connect(merger, 0, 1);
+  side.connect(sideLeft).connect(merger, 0, 0);
+  side.connect(sideRight).connect(merger, 0, 1);
+
+  const panner = context.createStereoPanner();
+  panner.pan.value = settings.pan / 100;
+  merger.connect(panner).connect(destination);
+}
+
+async function renderStemSongMix(song, sampleRate = null) {
+  await ensureStemBuffers(song);
+  const rate = sampleRate || Math.max(...song.stems.map(stem => stem.buffer.sampleRate));
+  const duration = Math.max(...song.stems.map(stem => stem.buffer.duration));
+  const context = new OfflineAudioContext(2, Math.ceil(duration * rate), rate);
+  const hasSolo = song.stems.some(stem => stem.settings.solo);
+
+  for (const stem of song.stems) {
+    const source = context.createBufferSource();
+    const needsRestoration = stem.settings.repairEdgeArtifacts ||
+      stem.settings.repairPrematureEnding || stem.settings.repairVocalCrackle;
+    if (needsRestoration) {
+      const restored = createRestoredInputBuffer(context, stem.buffer, stem.settings);
+      if (stem.settings.repairPrematureEnding) {
+        repairPrematureEnding(
+          Array.from({ length: restored.buffer.numberOfChannels }, (_, channel) => restored.buffer.getChannelData(channel)),
+          restored.buffer.sampleRate
+        );
+      }
+      source.buffer = restored.buffer;
+    } else {
+      source.buffer = stem.buffer;
+    }
+    const audible = !stem.settings.mute && (!hasSolo || stem.settings.solo);
+    connectStemProcessingChain(context, source, stem, audible, context.destination);
+    source.start(0);
+  }
+  return context.startRendering();
+}
+
+async function activateAudioBuffer(buffer, metaPrefix = '') {
+  state.file.buffer = buffer;
+  state.file.restorationPreviewBuffer = null;
+  state.file.restorationReport = null;
+  dom.fileMeta.textContent = 'Analyzing loudness...';
+
+  const lufsResult = measureLUFS(buffer);
+  state.file.lufs = lufsResult.integratedLUFS;
+  const targetLufs = dom.targetLufs ? parseInt(dom.targetLufs.value) : AUDIO_CONSTANTS.TARGET_LUFS;
+  state.file.normGain = calculateNormalizationGain(state.file.lufs, targetLufs);
+
+  createAudioChain();
+  updateRestorationPreview();
+  state.file.duration = buffer.duration;
+  dom.durationEl.textContent = formatTime(buffer.duration);
+
+  const lufsDisplay = isFinite(state.file.lufs) ? `${state.file.lufs.toFixed(1)} LUFS` : 'N/A';
+  const prefix = metaPrefix ? `${metaPrefix} • ` : '';
+  dom.fileMeta.textContent = `${prefix}${Math.round(buffer.sampleRate / 1000)}kHz • ${buffer.numberOfChannels}ch • ${formatTime(buffer.duration)} • ${lufsDisplay}`;
+  dom.playBtn.disabled = false;
+  dom.stopBtn.disabled = false;
+  dom.processBtn.disabled = false;
+}
+
+async function loadStemSong(song) {
+  stopAudio();
+  state.playback.pauseTime = 0;
+  state.file.path = song.path;
+  state.file.stemSong = song;
+  dom.fileName.textContent = song.name;
+  dom.fileMeta.textContent = `Loading ${song.stems.length} stems...`;
+  dom.fileZoneContent.classList.add('hidden');
+  dom.fileLoaded.classList.remove('hidden');
+
+  const mix = await renderStemSongMix(song);
+  await activateAudioBuffer(mix, `${song.stems.length} stems`);
+  updateChecklist();
+  renderBatchList();
+  drawWaveform();
+}
+
+let stemMixTimer = null;
+let stemMixInProgress = false;
+let pendingStemMix = null;
+function scheduleStemSongMix(song) {
+  pendingStemMix = song;
+  clearTimeout(stemMixTimer);
+  stemMixTimer = setTimeout(async () => {
+    if (stemMixInProgress) return;
+    const requestedSong = pendingStemMix;
+    pendingStemMix = null;
+    if (state.file.stemSong !== requestedSong) return;
+    stemMixInProgress = true;
+    const wasPlaying = state.playback.isPlaying;
+    const position = wasPlaying
+      ? state.audio.context.currentTime - state.playback.startTime
+      : state.playback.pauseTime;
+    stopAudio();
+    dom.fileMeta.textContent = 'Updating stem mix...';
+    try {
+      const mix = await renderStemSongMix(requestedSong);
+      if (state.file.stemSong !== requestedSong) return;
+      await activateAudioBuffer(mix, `${requestedSong.stems.length} stems`);
+      state.playback.pauseTime = Math.min(position, state.file.duration);
+      drawWaveform();
+      if (wasPlaying) playAudio();
+    } catch (error) {
+      showFileStatus(`✗ Could not update stem mix: ${error.message}`, 'error');
+    } finally {
+      stemMixInProgress = false;
+      if (pendingStemMix) scheduleStemSongMix(pendingStemMix);
+    }
+  }, 180);
+}
+
+async function importSunoStemsArchive(archivePath, loadSong = false) {
   try {
-    const stems = await window.electronAPI.importSunoStems(archivePath);
-    const stemPaths = stems.map(stem => stem.path);
-    if (stemPaths.length === 0) throw new Error('No supported audio stems were found in this ZIP.');
+    let song = batchState.queue.find(item => item.type === 'stem-song' && item.archivePath === archivePath);
+    if (!song) {
+      const stems = await window.electronAPI.importSunoStems(archivePath);
+      if (stems.length === 0) throw new Error('No supported audio stems were found in this ZIP.');
+      song = createStemSong(archivePath, stems);
+      song.expanded = loadSong;
+      batchState.queue.push(song);
+      updateBatchButtons();
+    }
+    renderBatchList();
+    renderMetaFileList();
+    if (loadSong) await loadStemSong(song);
 
-    await addFilesToBatch(stemPaths);
-    if (loadFirstStem) await loadFile(stemPaths[0]);
-
-    const archiveName = archivePath.split(/[\\/]/).pop();
-    showFileStatus(`✓ Imported ${stemPaths.length} stems from ${archiveName}.`, 'success');
-    return stemPaths;
+    showFileStatus(`✓ Imported ${song.stems.length} stems as ${song.name}.`, 'success');
+    return song;
   } catch (error) {
     console.error('Error importing Suno stems:', error);
     showFileStatus(`✗ Could not import Suno stems: ${error.message}`, 'error');
@@ -736,32 +1007,9 @@ async function loadAudioFile(filePath) {
   const ctx = initAudioContext();
 
   try {
-    const arrayData = await window.electronAPI.readAudioFile(filePath);
-    const uint8Array = new Uint8Array(arrayData);
-    state.file.buffer = await ctx.decodeAudioData(uint8Array.buffer);
-    state.file.restorationPreviewBuffer = null;
-    state.file.restorationReport = null;
-
-    dom.fileMeta.textContent = 'Analyzing loudness...';
-    const lufsResult = measureLUFS(state.file.buffer);
-    state.file.lufs = lufsResult.integratedLUFS;
-    const targetLufs = dom.targetLufs ? parseInt(dom.targetLufs.value) : AUDIO_CONSTANTS.TARGET_LUFS;
-    state.file.normGain = calculateNormalizationGain(state.file.lufs, targetLufs);
-
-    createAudioChain();
-    updateRestorationPreview();
-
-    state.file.duration = state.file.buffer.duration;
-    dom.durationEl.textContent = formatTime(state.file.duration);
-
-    const sampleRate = state.file.buffer.sampleRate;
-    const channels = state.file.buffer.numberOfChannels;
-    const lufsDisplay = isFinite(state.file.lufs) ? `${state.file.lufs.toFixed(1)} LUFS` : 'N/A';
-    dom.fileMeta.textContent = `${Math.round(sampleRate / 1000)}kHz • ${channels}ch • ${formatTime(state.file.duration)} • ${lufsDisplay}`;
-
-    dom.playBtn.disabled = false;
-    dom.stopBtn.disabled = false;
-    dom.processBtn.disabled = false;
+    const buffer = await decodeAudioPath(filePath, ctx);
+    state.file.stemSong = null;
+    await activateAudioBuffer(buffer);
 
     return true;
   } catch (error) {
@@ -1260,6 +1508,7 @@ async function loadFile(filePath) {
   }
 
   state.file.path = filePath;
+  state.file.stemSong = null;
 
   try {
     const name = filePath.split(/[\\/]/).pop();
@@ -1341,8 +1590,7 @@ dom.bypassBtn.addEventListener('click', () => {
 });
 
 // ─── Offline Export (uses shared node factory, no duplicate stereo width) ────
-async function processAudioOffline(settings) {
-  const inputBuffer = state.file.buffer;
+async function processAudioOffline(settings, inputBuffer = state.file.buffer) {
   const targetSampleRate = settings.sampleRate;
   const numChannels = inputBuffer.numberOfChannels;
 
@@ -1539,7 +1787,10 @@ dom.processBtn.addEventListener('click', async () => {
   try {
     updateProgress(10);
 
-    const processedBuffer = await processAudioOffline(settings);
+    const songInput = state.file.stemSong
+      ? await renderStemSongMix(state.file.stemSong, settings.sampleRate)
+      : state.file.buffer;
+    const processedBuffer = await processAudioOffline(settings, songInput);
     updateProgress(60);
 
     const wavBuffer = encodeWAV(processedBuffer, {
@@ -1867,6 +2118,7 @@ const batchDom = {
   progressText: document.getElementById('batchProgressText'),
   progressPercent: document.getElementById('batchProgressPercent'),
   progressFill: document.getElementById('batchProgressFill'),
+  stemEditor: document.getElementById('stemEditor'),
   // Tabs
   tabQueue: document.getElementById('tabQueue'),
   tabMeta: document.getElementById('tabMeta'),
@@ -2025,35 +2277,217 @@ function ensureFileInQueue(filePath) {
   }
 }
 
+function escapeHTML(value) {
+  return String(value).replace(/[&<>"']/g, character => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+  })[character]);
+}
+
+function getQueueStatus(item) {
+  return {
+    icon: item.status === 'done' ? '✓' : item.status === 'error' ? '✗' : item.status === 'processing' ? '⏳' : item.type === 'stem-song' ? '🎛️' : '🎵',
+    text: item.status === 'done' ? 'Done' : item.status === 'error' ? 'Error' : item.status === 'processing' ? 'Processing...' : 'Pending',
+    className: item.status === 'pending' ? '' : item.status
+  };
+}
+
+function renderStemEditor() {
+  const song = batchState.queue.find(item => item.type === 'stem-song' && item.selectedStemIndex >= 0);
+  if (!song || !song.stems[song.selectedStemIndex]) {
+    batchDom.stemEditor.classList.add('hidden');
+    batchDom.stemEditor.innerHTML = '';
+    return;
+  }
+
+  const stem = song.stems[song.selectedStemIndex];
+  const settings = stem.settings;
+  const toggle = (key, label, tip) => `
+    <label class="stem-editor-toggle" title="${tip}">
+      <input type="checkbox" data-stem-editor-setting="${key}" ${settings[key] ? 'checked' : ''}>
+      <span>${label}</span>
+    </label>`;
+  const slider = (key, label, min, max, step, suffix = ' dB') => `
+    <label class="stem-editor-slider">
+      <span>${label}</span>
+      <input type="range" min="${min}" max="${max}" step="${step}" value="${settings[key]}" data-stem-editor-setting="${key}">
+      <output>${settings[key]}${suffix}</output>
+    </label>`;
+
+  batchDom.stemEditor.classList.remove('hidden');
+  batchDom.stemEditor.innerHTML = `
+    <div class="stem-editor-header">
+      <div><strong>${escapeHTML(stem.name)}</strong><span>Pre-master stem processing</span></div>
+      <div class="stem-editor-actions">
+        <button class="btn-batch" data-stem-editor-action="reset">Reset</button>
+        <button class="stem-editor-close" data-stem-editor-action="close" aria-label="Close stem editor">✕</button>
+      </div>
+    </div>
+    <div class="stem-editor-mixer">
+      ${slider('gainDb', 'Gain', -24, 12, 0.1)}
+      ${slider('pan', 'Pan', -100, 100, 1, '')}
+      ${slider('width', 'Width', 0, 200, 1, '%')}
+    </div>
+    <div class="stem-editor-toggles">
+      ${toggle('cleanLowEnd', 'Clean Low End', 'High-pass this stem below 30Hz.')}
+      ${toggle('glueCompression', 'Compression', 'Apply light compression before the song master bus.')}
+      ${toggle('cutMud', 'Cut Mud', 'Reduce 250Hz buildup on this stem.')}
+      ${toggle('addAir', 'Add Air', 'Add a 12kHz shelf to this stem.')}
+      ${toggle('tameHarsh', 'Tame Harshness', 'Reduce harsh 4–6kHz energy on this stem.')}
+    </div>
+    <div class="stem-editor-section-title">Stem EQ</div>
+    <div class="stem-editor-eq">
+      ${slider('eqLow', '80Hz', -12, 12, 1)}
+      ${slider('eqLowMid', '250Hz', -12, 12, 1)}
+      ${slider('eqMid', '1kHz', -12, 12, 1)}
+      ${slider('eqHighMid', '4kHz', -12, 12, 1)}
+      ${slider('eqHigh', '12kHz', -12, 12, 1)}
+    </div>
+    <div class="stem-editor-section-title">Stem Restoration</div>
+    <div class="stem-editor-toggles">
+      ${toggle('repairEdgeArtifacts', 'Repair Edges', 'Repair detected boundary clicks or bursts on this stem.')}
+      ${toggle('repairPrematureEnding', 'Repair Cutoff', 'Apply a clean release only if this stem ends abruptly.')}
+      ${toggle('repairVocalCrackle', 'Repair Crackle', 'Repair detected impulses in quiet passages of this stem.')}
+    </div>
+    <p class="stem-editor-note">Loudness normalization, true-peak limiting, and export format remain at song level.</p>
+  `;
+
+  batchDom.stemEditor.querySelectorAll('[data-stem-editor-setting]').forEach(input => {
+    const eventName = input.type === 'checkbox' ? 'change' : 'input';
+    input.addEventListener(eventName, () => {
+      const key = input.dataset.stemEditorSetting;
+      stem.settings[key] = input.type === 'checkbox' ? input.checked : parseFloat(input.value);
+      const output = input.parentElement.querySelector('output');
+      if (output) {
+        const suffix = key === 'width' ? '%' : key === 'pan' ? '' : ' dB';
+        output.textContent = `${input.value}${suffix}`;
+      }
+      scheduleStemSongMix(song);
+    });
+  });
+
+  batchDom.stemEditor.querySelector('[data-stem-editor-action="close"]').addEventListener('click', () => {
+    song.selectedStemIndex = -1;
+    renderBatchList();
+  });
+  batchDom.stemEditor.querySelector('[data-stem-editor-action="reset"]').addEventListener('click', () => {
+    const { mute, solo } = stem.settings;
+    stem.settings = { ...createDefaultStemSettings(), mute, solo };
+    renderStemEditor();
+    renderBatchList();
+    scheduleStemSongMix(song);
+  });
+}
+
 function renderBatchList() {
   batchDom.list.innerHTML = '';
   batchState.queue.forEach((item, index) => {
+    if (item.type === 'stem-song') {
+      const group = document.createElement('div');
+      group.className = 'batch-song-group';
+      group.setAttribute('role', 'listitem');
+      const isLoaded = state.file.path === item.path;
+      const status = getQueueStatus(item);
+      group.innerHTML = `
+        <div class="batch-item batch-song-item${isLoaded ? ' batch-item-loaded' : ''}">
+          <button class="batch-song-expand" data-song-action="expand" data-index="${index}" aria-label="${item.expanded ? 'Collapse' : 'Expand'} ${escapeHTML(item.name)}">${item.expanded ? '▾' : '▸'}</button>
+          <span class="batch-item-icon">${status.icon}</span>
+          <span class="batch-item-name" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span>
+          <span class="stem-count-badge">${item.stems.length} stems</span>
+          ${isLoaded ? '<span class="batch-item-playing">♦ Loaded mix</span>' : ''}
+          ${!batchState.isProcessing ? `<button class="batch-item-preview" data-song-action="preview" data-index="${index}" aria-label="Play combined song ${escapeHTML(item.name)}" title="Load combined song into player">▶ Mix</button>` : ''}
+          <span class="batch-item-status ${status.className}">${status.text}</span>
+          ${!batchState.isProcessing ? `<button class="batch-item-remove" data-song-action="remove" data-index="${index}" aria-label="Remove ${escapeHTML(item.name)} from queue">✕</button>` : ''}
+        </div>`;
+
+      if (item.expanded) {
+        const children = document.createElement('div');
+        children.className = 'stem-children';
+        item.stems.forEach((stem, stemIndex) => {
+          const child = document.createElement('div');
+          child.className = `stem-row${item.selectedStemIndex === stemIndex ? ' selected' : ''}`;
+          child.innerHTML = `
+            <span class="stem-branch">└</span>
+            <button class="stem-toggle${stem.settings.mute ? ' active mute' : ''}" data-stem-action="mute" data-index="${index}" data-stem-index="${stemIndex}" title="Mute stem">M</button>
+            <button class="stem-toggle${stem.settings.solo ? ' active solo' : ''}" data-stem-action="solo" data-index="${index}" data-stem-index="${stemIndex}" title="Solo stem">S</button>
+            <span class="stem-row-name" title="${escapeHTML(stem.name)}">${escapeHTML(stem.name.replace(/^\d+\s+/, ''))}</span>
+            <label class="stem-inline-control" title="Stem gain"><span>Gain</span><input type="range" min="-24" max="12" step="0.5" value="${stem.settings.gainDb}" data-stem-setting="gainDb" data-index="${index}" data-stem-index="${stemIndex}"><output>${stem.settings.gainDb} dB</output></label>
+            <label class="stem-inline-control" title="Stem pan"><span>Pan</span><input type="range" min="-100" max="100" step="1" value="${stem.settings.pan}" data-stem-setting="pan" data-index="${index}" data-stem-index="${stemIndex}"><output>${stem.settings.pan}</output></label>
+            <button class="stem-edit" data-stem-action="edit" data-index="${index}" data-stem-index="${stemIndex}">Edit</button>`;
+          children.appendChild(child);
+        });
+        group.appendChild(children);
+      }
+      batchDom.list.appendChild(group);
+      return;
+    }
+
     const el = document.createElement('div');
     const isLoaded = state.file.path === item.path;
     el.className = 'batch-item' + (isLoaded ? ' batch-item-loaded' : '');
     el.setAttribute('role', 'listitem');
-
-    const statusIcon = item.status === 'done' ? '✓' :
-                       item.status === 'error' ? '✗' :
-                       item.status === 'processing' ? '⏳' : '🎵';
-    const statusText = item.status === 'done' ? 'Done' :
-                       item.status === 'error' ? 'Error' :
-                       item.status === 'processing' ? 'Processing...' : 'Pending';
-    const statusClass = item.status === 'pending' ? '' : item.status;
+    const status = getQueueStatus(item);
 
     el.innerHTML = `
-      <span class="batch-item-icon">${statusIcon}</span>
-      <span class="batch-item-name" title="${item.name}">${item.name}</span>
+      <span class="batch-item-icon">${status.icon}</span>
+      <span class="batch-item-name" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</span>
       ${isLoaded ? '<span class="batch-item-playing">♦ Loaded</span>' : ''}
-      ${!batchState.isProcessing ? `<button class="batch-item-preview" data-index="${index}" aria-label="Preview ${item.name} in player" title="Load into player">▶</button>` : ''}
-      <span class="batch-item-status ${statusClass}">${statusText}</span>
-      ${!batchState.isProcessing ? `<button class="batch-item-remove" data-index="${index}" aria-label="Remove ${item.name} from queue">✕</button>` : ''}
+      ${!batchState.isProcessing ? `<button class="batch-item-preview" data-index="${index}" aria-label="Preview ${escapeHTML(item.name)} in player" title="Load into player">▶</button>` : ''}
+      <span class="batch-item-status ${status.className}">${status.text}</span>
+      ${!batchState.isProcessing ? `<button class="batch-item-remove" data-index="${index}" aria-label="Remove ${escapeHTML(item.name)} from queue">✕</button>` : ''}
     `;
     batchDom.list.appendChild(el);
   });
 
+  batchDom.list.querySelectorAll('[data-song-action]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const index = parseInt(button.dataset.index);
+      const song = batchState.queue[index];
+      if (!song) return;
+      if (button.dataset.songAction === 'expand') {
+        song.expanded = !song.expanded;
+        renderBatchList();
+      } else if (button.dataset.songAction === 'preview') {
+        await loadStemSong(song);
+      } else if (button.dataset.songAction === 'remove') {
+        batchState.queue.splice(index, 1);
+        renderBatchList();
+        renderMetaFileList();
+        updateBatchButtons();
+      }
+    });
+  });
+
+  batchDom.list.querySelectorAll('[data-stem-action]').forEach(button => {
+    button.addEventListener('click', () => {
+      const song = batchState.queue[parseInt(button.dataset.index)];
+      const stemIndex = parseInt(button.dataset.stemIndex);
+      if (!song?.stems[stemIndex]) return;
+      if (button.dataset.stemAction === 'edit') {
+        batchState.queue.forEach(item => { if (item.type === 'stem-song' && item !== song) item.selectedStemIndex = -1; });
+        song.selectedStemIndex = stemIndex;
+      } else {
+        const key = button.dataset.stemAction;
+        song.stems[stemIndex].settings[key] = !song.stems[stemIndex].settings[key];
+        scheduleStemSongMix(song);
+      }
+      renderBatchList();
+    });
+  });
+
+  batchDom.list.querySelectorAll('[data-stem-setting]').forEach(input => {
+    input.addEventListener('input', () => {
+      const song = batchState.queue[parseInt(input.dataset.index)];
+      const stem = song?.stems[parseInt(input.dataset.stemIndex)];
+      if (!stem) return;
+      stem.settings[input.dataset.stemSetting] = parseFloat(input.value);
+      const output = input.parentElement.querySelector('output');
+      output.textContent = input.dataset.stemSetting === 'gainDb' ? `${input.value} dB` : input.value;
+      scheduleStemSongMix(song);
+    });
+  });
+
   // Attach preview handlers
-  batchDom.list.querySelectorAll('.batch-item-preview').forEach(btn => {
+  batchDom.list.querySelectorAll('.batch-item-preview:not([data-song-action])').forEach(btn => {
     btn.addEventListener('click', async () => {
       const idx = parseInt(btn.dataset.index);
       const item = batchState.queue[idx];
@@ -2067,7 +2501,7 @@ function renderBatchList() {
   });
 
   // Attach remove handlers
-  batchDom.list.querySelectorAll('.batch-item-remove').forEach(btn => {
+  batchDom.list.querySelectorAll('.batch-item-remove:not([data-song-action])').forEach(btn => {
     btn.addEventListener('click', () => {
       const idx = parseInt(btn.dataset.index);
       batchState.queue.splice(idx, 1);
@@ -2076,6 +2510,7 @@ function renderBatchList() {
       updateBatchButtons();
     });
   });
+  renderStemEditor();
 }
 
 async function addFilesToBatch(filePaths) {
@@ -2084,8 +2519,7 @@ async function addFilesToBatch(filePaths) {
   try {
     for (const filePath of filePaths) {
       if (SUNO_STEMS_ARCHIVE_PATTERN.test(filePath)) {
-        const stems = await window.electronAPI.importSunoStems(filePath);
-        expandedPaths.push(...stems.map(stem => stem.path));
+        await importSunoStemsArchive(filePath, false);
         importedArchives++;
       } else if (AUDIO_FILE_PATTERN.test(filePath)) {
         expandedPaths.push(filePath);
@@ -2209,6 +2643,7 @@ batchDom.exportBtn.addEventListener('click', async () => {
   const origBuffer = state.file.buffer;
   const origLufs = state.file.lufs;
   const origNormGain = state.file.normGain;
+  const origStemSong = state.file.stemSong;
 
   for (let i = 0; i < total; i++) {
     const item = batchState.queue[i];
@@ -2220,14 +2655,14 @@ batchDom.exportBtn.addEventListener('click', async () => {
     await yieldToUI();
 
     try {
-      // Decode audio
-      const ctx = new AudioContext();
-      const arrayData = await window.electronAPI.readAudioFile(item.path);
-      await yieldToUI();
-
-      const uint8Array = new Uint8Array(arrayData);
-      const audioBuffer = await ctx.decodeAudioData(uint8Array.buffer);
-      await ctx.close();
+      let audioBuffer;
+      if (item.type === 'stem-song') {
+        audioBuffer = await renderStemSongMix(item, settings.sampleRate);
+      } else {
+        const ctx = new AudioContext();
+        audioBuffer = await decodeAudioPath(item.path, ctx);
+        await ctx.close();
+      }
       await yieldToUI();
 
       // Measure LUFS
@@ -2240,7 +2675,7 @@ batchDom.exportBtn.addEventListener('click', async () => {
       state.file.lufs = lufsResult.integratedLUFS;
       state.file.normGain = calculateNormalizationGain(lufsResult.integratedLUFS, targetLufs);
 
-      const processedBuffer = await processAudioOffline(settings);
+      const processedBuffer = await processAudioOffline(settings, audioBuffer);
       await yieldToUI();
 
       const wavBuffer = encodeWAV(processedBuffer, {
@@ -2276,6 +2711,7 @@ batchDom.exportBtn.addEventListener('click', async () => {
   state.file.buffer = origBuffer;
   state.file.lufs = origLufs;
   state.file.normGain = origNormGain;
+  state.file.stemSong = origStemSong;
 
   batchState.isProcessing = false;
   updateBatchButtons();

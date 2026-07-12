@@ -130,6 +130,7 @@
           <button class="batch-tab active" id="tabQueue" role="tab" aria-selected="true" aria-controls="batchTabQueue">📦 Queue</button>
           <button class="batch-tab" id="tabMeta" role="tab" aria-selected="false" aria-controls="batchTabMeta">🏷️ Metadata</button>
         </div>
+        <span class="batch-scope-hint">Stem controls feed the song-level mastering chain below</span>
         <div class="batch-actions">
           <button id="batchAddFiles" class="btn-batch" aria-label="Add audio files or Suno stem archives to batch queue">+ Add Files</button>
           <button id="batchClear" class="btn-batch btn-batch-secondary" aria-label="Clear batch queue" disabled>Clear</button>
@@ -143,6 +144,7 @@
           <span class="batch-drop-text">Drop audio files or a Suno stems ZIP here, or click "Add Files"</span>
         </div>
         <div class="batch-list" id="batchList" role="list" aria-label="Queued files"></div>
+        <div class="stem-editor hidden" id="stemEditor" role="region" aria-label="Selected stem processing controls"></div>
         <div class="batch-progress hidden" id="batchProgress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
           <div class="batch-progress-info">
             <span id="batchProgressText">Processing 0/0...</span>
@@ -201,6 +203,11 @@
           </div>
         </div>
       </div>
+    </div>
+
+    <div class="master-scope-banner" role="note">
+      <span>SONG MASTER</span>
+      <p>The controls below process the combined stem mix. Use a stem’s Edit button for pre-master changes.</p>
     </div>
 
     <!-- Settings Row 1 -->

@@ -6,7 +6,8 @@ A professional desktop app for mastering AI-generated music to streaming-ready q
 ## Features
 
 - **Batch Processing** - Queue multiple files, apply the same settings, and export all at once
-- **Suno Stem ZIP Import** - Load a Suno stem export; its audio stems are extracted into the batch queue and the first stem opens in the player
+- **Suno Multitrack Mixing** - A stem ZIP appears as one expandable song, plays as a synchronized combined mix, and exports as one mastered track
+- **Per-Stem Processing** - Gain, pan, width, mute/solo, EQ, cleanup, compression, polish, and restoration before the song master bus
 - **Metadata Editor** - Add title, artist, album, genre, year, track number, and comments per file
 - **Loudness Normalization** - Adjustable target LUFS (-20 to -6 LUFS)
 - **True Peak Limiting** - Prevents clipping with adjustable ceiling
@@ -31,10 +32,11 @@ Get the latest release for your platform:
 ## Usage
 
 1. Drag & drop an audio file (MP3, WAV, FLAC, AAC, M4A, MP4) or a Suno stems ZIP
-2. Preview with the built-in player
-3. Adjust EQ, loudness, and mastering settings
-4. Toggle FX bypass to compare before/after
-5. Click "Export WAV" for a single file
+2. Expand a stem song to balance individual stems, or press **Edit** for detailed stem processing
+3. Preview the combined mix with the built-in player
+4. Adjust the song-level EQ, loudness, and mastering settings
+5. Toggle FX bypass to compare before/after
+6. Click "Export WAV" for the combined mastered song
 
 ### Restoration
 
