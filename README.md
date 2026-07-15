@@ -14,6 +14,10 @@ A professional desktop app for mastering AI-generated music to streaming-ready q
 - **Input Gain Control** - Adjust input level before processing (-12 to +12 dB)
 - **Stereo Width** - Control stereo image (0% mono to 200% extra wide) with optional 120Hz mono bass
 - **5-Band EQ** - Fine-tune with visual faders and presets (Flat, Vocal Boost, Bass Boost, Bright, Warm, AI Fix)
+- **3-Band Dynamic EQ** - Stereo-linked adaptive control for intermittent boom, boxiness, and harshness without permanent tonal cuts
+- **Dedicated De-Esser** - Adjustable 4–10kHz focus, maximum range, attack/release, and monitor-only reduction audition
+- **Stem-Aware Compression** - Vocal, Bass, Drums, and Music presets plus threshold, ratio, attack, release, knee, maximum reduction, parallel mix, makeup, and live gain-reduction metering
+- **Loudness-Matched Bypass** - Rolling wet/dry energy matching keeps FX comparisons from being biased by level changes
 - **Quick Fix Tools** - Glue compression, clean low end
 - **Polish Effects** - Cut mud, add air, tame harshness
 - **Analysis-Gated Restoration** - Optional stereo-linked boundary declicking, hard-cut ending repair, and quiet-passage decrackling

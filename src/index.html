@@ -80,7 +80,7 @@
               <span id="duration" class="time" aria-label="Total duration">0:00</span>
             </div>
           </div>
-          <button id="bypassBtn" class="btn-bypass" aria-label="Toggle effects bypass (B)">🔊 FX On</button>
+          <button id="bypassBtn" class="btn-bypass" aria-label="Toggle loudness-matched effects bypass (B)">🔊 FX On</button>
         </div>
         <div class="level-meters" role="group" aria-label="Audio level meters">
           <div class="meter-channel">
@@ -277,6 +277,36 @@
           <span class="toggle" aria-hidden="true"></span>
         </label>
         <div class="restoration-status" id="restorationStatus" role="status" aria-live="polite">Preview: restoration off</div>
+      </div>
+
+      <div class="settings-card adaptive-dynamics-card">
+        <h3>Adaptive Dynamics <span class="live-badge">P1</span></h3>
+        <label class="toggle-row" data-tip="Stereo-linked dynamic cuts at 120Hz, 350Hz, and 3.8kHz react only when boom, boxiness, or harshness becomes excessive.">
+          <span>3-Band Dynamic EQ</span>
+          <input type="checkbox" id="dynamicEq" aria-label="Enable three-band dynamic equalizer">
+          <span class="toggle" aria-hidden="true"></span>
+        </label>
+        <div class="slider-row" data-tip="Scales the maximum adaptive reduction while preserving the conservative band thresholds.">
+          <span>EQ Amount</span>
+          <input type="range" id="dynamicEqAmount" min="0" max="100" step="1" value="50" aria-label="Dynamic EQ amount">
+          <span class="slider-value" id="dynamicEqAmountValue">50%</span>
+        </div>
+        <label class="toggle-row" data-tip="Dedicated stereo-linked sibilance control for vocal-heavy mixes and single-file sources.">
+          <span>Vocal De-Esser</span>
+          <input type="checkbox" id="deEsser" aria-label="Enable vocal de-esser">
+          <span class="toggle" aria-hidden="true"></span>
+        </label>
+        <div class="slider-row"><span>Focus</span><input type="range" id="deEsserFrequency" min="4000" max="10000" step="100" value="7000" aria-label="De-esser focus frequency"><span class="slider-value" id="deEsserFrequencyValue">7.0 kHz</span></div>
+        <div class="slider-row"><span>Max Range</span><input type="range" id="deEsserRange" min="1" max="10" step="0.5" value="4" aria-label="Maximum de-esser reduction"><span class="slider-value" id="deEsserRangeValue">4.0 dB</span></div>
+        <div class="adaptive-time-row">
+          <div class="slider-row"><span>Attack</span><input type="range" id="deEsserAttack" min="1" max="30" step="1" value="5" aria-label="De-esser attack"><span class="slider-value" id="deEsserAttackValue">5 ms</span></div>
+          <div class="slider-row"><span>Release</span><input type="range" id="deEsserRelease" min="30" max="300" step="5" value="80" aria-label="De-esser release"><span class="slider-value" id="deEsserReleaseValue">80 ms</span></div>
+        </div>
+        <label class="toggle-row compact-toggle" data-tip="Listen only to the sibilant content removed by the de-esser. This monitor-only signal is never written into exports.">
+          <span>Audition Removed S</span>
+          <input type="checkbox" id="deEsserAudition" aria-label="Audition de-esser reduction signal">
+          <span class="toggle" aria-hidden="true"></span>
+        </label>
       </div>
 
       <div class="settings-card">

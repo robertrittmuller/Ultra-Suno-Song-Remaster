@@ -638,7 +638,7 @@ html[data-platform="darwin"] .window-controls {
 /* Settings Grid - Row 1 */
 .panel-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
   flex-shrink: 0;
 }
@@ -684,6 +684,28 @@ html[data-platform="darwin"] .window-controls {
 
 .restoration-status.detected {
   color: var(--theme-accent);
+}
+
+.adaptive-dynamics-card .slider-row {
+  display: grid;
+  grid-template-columns: 54px minmax(45px, 1fr) 45px;
+  min-width: 0;
+}
+
+.adaptive-dynamics-card .slider-row input[type="range"] {
+  width: 100%;
+  min-width: 0;
+}
+
+.adaptive-time-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 3px;
+  min-width: 0;
+}
+
+.compact-toggle {
+  margin-top: 5px;
 }
 
 /* Loudness Card */
@@ -1744,7 +1766,8 @@ html[data-platform="darwin"] .window-controls {
 .stem-editor-actions,
 .stem-editor-mixer,
 .stem-editor-toggles,
-.stem-editor-eq {
+.stem-editor-eq,
+.stem-compression-heading {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1776,6 +1799,16 @@ html[data-platform="darwin"] .window-controls {
 
 .stem-editor-eq {
   grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.stem-editor-dynamics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.stem-compressor-controls {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .stem-editor-slider {
@@ -1827,6 +1860,65 @@ html[data-platform="darwin"] .window-controls {
   font-weight: 700;
   letter-spacing: 0.4px;
   text-transform: uppercase;
+}
+
+.stem-compression-heading {
+  justify-content: space-between;
+  margin-bottom: 7px;
+}
+
+.stem-preset-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.stem-preset-btn {
+  padding: 3px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 8px;
+  cursor: pointer;
+}
+
+.stem-preset-btn.active {
+  border-color: var(--theme-accent);
+  color: var(--theme-accent);
+  background: rgba(168, 85, 247, 0.12);
+}
+
+.stem-gr-meter {
+  display: grid;
+  grid-template-columns: 70px minmax(100px, 1fr) 48px minmax(180px, auto);
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 8px;
+}
+
+.stem-gr-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--bg-secondary);
+}
+
+.stem-gr-fill {
+  width: 0;
+  height: 100%;
+  background: linear-gradient(90deg, var(--theme-accent), #ef4444);
+  transition: width 80ms linear;
+}
+
+.stem-gr-meter output {
+  color: var(--text-primary);
+}
+
+.stem-adaptive-meter {
+  text-align: right;
+  color: var(--text-muted);
 }
 
 .stem-editor-note {

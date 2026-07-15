@@ -4,7 +4,8 @@ import {
   MONO_BASS_FREQUENCY,
   configureMasteringNodes,
   connectMasteringGraph,
-  createMasteringNodes
+  createMasteringNodes,
+  updateMatchedBypassGain
 } from '../src/masteringEngine.js';
 
 function parameter(value = 0) {
@@ -67,4 +68,24 @@ test('disabled glue uses a latency-free gain bypass', () => {
   const context = fakeContext();
   const nodes = createMasteringNodes(context, new FakeNode('gain'), { glueCompression: false });
   assert.equal(nodes.compressor.kind, 'gain');
+});
+
+test('adaptive studio dynamics precede glue compression and stereo processing', () => {
+  const context = fakeContext();
+  const studioDynamics = new FakeNode('studio-dynamics');
+  const nodes = createMasteringNodes(context, new FakeNode('gain'), {
+    glueCompression: true,
+    studioDynamics
+  });
+  connectMasteringGraph(new FakeNode('source'), nodes);
+  assert.equal(nodes.highshelf.connections[0], studioDynamics);
+  assert.equal(studioDynamics.connections[0], nodes.compressor);
+  assert.equal(nodes.compressor.connections[0], nodes.stereoSplitter);
+});
+
+test('loudness-matched bypass follows measured wet-to-dry energy without unsafe gain jumps', () => {
+  assert.equal(updateMatchedBypassGain(1, 0, 1), 1);
+  assert.equal(updateMatchedBypassGain(1, 4, 1, 0), 2);
+  assert.equal(updateMatchedBypassGain(1, 1000, 1, 0), 4);
+  assert.equal(updateMatchedBypassGain(1, 0.0001, 1, 0), 0.25);
 });

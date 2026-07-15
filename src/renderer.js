@@ -9,9 +9,19 @@ import {
   connectMasteringGraph,
   createMasteringNodes,
   createRealtimeLimiterNode,
-  setLimiterParameters
+  setLimiterParameters,
+  updateMatchedBypassGain
 } from './masteringEngine.js';
 import { finalizeMaster } from './truePeakLimiter.js';
+import {
+  STEM_COMPRESSION_PRESETS,
+  applyStemCompressionPreset,
+  configureStudioDynamicsNode,
+  createMasterDynamicsConfig,
+  createStemDynamicsConfig,
+  createStudioDynamicsNode,
+  ensureStudioDynamicsWorklet
+} from './studioDynamics.js';
 
 // ─── Settings Persistence ───────────────────────────────────────────────────
 const STORAGE_KEY = 'ai-mastering-settings';
@@ -32,6 +42,14 @@ function saveSettingsToStorage() {
       cutMud: dom.cutMud.checked,
       addAir: dom.addAir.checked,
       tameHarsh: dom.tameHarsh.checked,
+      dynamicEq: dom.dynamicEq.checked,
+      dynamicEqAmount: parseInt(dom.dynamicEqAmount.value),
+      deEsser: dom.deEsser.checked,
+      deEsserFrequency: parseInt(dom.deEsserFrequency.value),
+      deEsserRange: parseFloat(dom.deEsserRange.value),
+      deEsserAttack: parseFloat(dom.deEsserAttack.value),
+      deEsserRelease: parseFloat(dom.deEsserRelease.value),
+      deEsserAudition: dom.deEsserAudition.checked,
       repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
       repairPrematureEnding: dom.repairPrematureEnding.checked,
       repairVocalCrackle: dom.repairVocalCrackle.checked,
@@ -63,6 +81,9 @@ function loadSettingsFromStorage() {
     if (s.cutMud !== undefined) dom.cutMud.checked = s.cutMud;
     if (s.addAir !== undefined) dom.addAir.checked = s.addAir;
     if (s.tameHarsh !== undefined) dom.tameHarsh.checked = s.tameHarsh;
+    if (s.dynamicEq !== undefined) dom.dynamicEq.checked = s.dynamicEq;
+    if (s.deEsser !== undefined) dom.deEsser.checked = s.deEsser;
+    if (s.deEsserAudition !== undefined) dom.deEsserAudition.checked = s.deEsserAudition;
     if (s.repairEdgeArtifacts !== undefined) dom.repairEdgeArtifacts.checked = s.repairEdgeArtifacts;
     if (s.repairPrematureEnding !== undefined) dom.repairPrematureEnding.checked = s.repairPrematureEnding;
     if (s.repairVocalCrackle !== undefined) dom.repairVocalCrackle.checked = s.repairVocalCrackle;
@@ -72,6 +93,11 @@ function loadSettingsFromStorage() {
     if (s.targetLufs !== undefined && dom.targetLufs) dom.targetLufs.value = s.targetLufs;
     if (s.inputGain !== undefined && dom.inputGain) dom.inputGain.value = s.inputGain;
     if (s.stereoWidth !== undefined && dom.stereoWidth) dom.stereoWidth.value = s.stereoWidth;
+    if (s.dynamicEqAmount !== undefined) dom.dynamicEqAmount.value = s.dynamicEqAmount;
+    if (s.deEsserFrequency !== undefined) dom.deEsserFrequency.value = s.deEsserFrequency;
+    if (s.deEsserRange !== undefined) dom.deEsserRange.value = s.deEsserRange;
+    if (s.deEsserAttack !== undefined) dom.deEsserAttack.value = s.deEsserAttack;
+    if (s.deEsserRelease !== undefined) dom.deEsserRelease.value = s.deEsserRelease;
     if (s.sampleRate !== undefined) dom.sampleRate.value = s.sampleRate;
     if (s.bitDepth !== undefined) dom.bitDepth.value = s.bitDepth;
 
@@ -94,6 +120,7 @@ function loadSettingsFromStorage() {
     if (dom.targetLufsValue && dom.targetLufs) dom.targetLufsValue.textContent = `${dom.targetLufs.value} LUFS`;
     if (dom.inputGainValue && dom.inputGain) dom.inputGainValue.textContent = `${parseFloat(dom.inputGain.value).toFixed(1)} dB`;
     if (dom.stereoWidthValue && dom.stereoWidth) dom.stereoWidthValue.textContent = `${dom.stereoWidth.value}%`;
+    updateAdaptiveDynamicsDisplays();
   } catch (e) { /* ignore parse errors */ }
 }
 
@@ -116,6 +143,14 @@ function captureState() {
     cutMud: dom.cutMud.checked,
     addAir: dom.addAir.checked,
     tameHarsh: dom.tameHarsh.checked,
+    dynamicEq: dom.dynamicEq.checked,
+    dynamicEqAmount: parseInt(dom.dynamicEqAmount.value),
+    deEsser: dom.deEsser.checked,
+    deEsserFrequency: parseInt(dom.deEsserFrequency.value),
+    deEsserRange: parseFloat(dom.deEsserRange.value),
+    deEsserAttack: parseFloat(dom.deEsserAttack.value),
+    deEsserRelease: parseFloat(dom.deEsserRelease.value),
+    deEsserAudition: dom.deEsserAudition.checked,
     repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
     repairPrematureEnding: dom.repairPrematureEnding.checked,
     repairVocalCrackle: dom.repairVocalCrackle.checked,
@@ -146,6 +181,14 @@ function applyState(s) {
   dom.cutMud.checked = s.cutMud;
   dom.addAir.checked = s.addAir;
   dom.tameHarsh.checked = s.tameHarsh;
+  dom.dynamicEq.checked = s.dynamicEq;
+  dom.dynamicEqAmount.value = s.dynamicEqAmount;
+  dom.deEsser.checked = s.deEsser;
+  dom.deEsserFrequency.value = s.deEsserFrequency;
+  dom.deEsserRange.value = s.deEsserRange;
+  dom.deEsserAttack.value = s.deEsserAttack;
+  dom.deEsserRelease.value = s.deEsserRelease;
+  dom.deEsserAudition.checked = s.deEsserAudition;
   dom.repairEdgeArtifacts.checked = s.repairEdgeArtifacts;
   dom.repairPrematureEnding.checked = s.repairPrematureEnding;
   dom.repairVocalCrackle.checked = s.repairVocalCrackle;
@@ -160,6 +203,7 @@ function applyState(s) {
   if (dom.targetLufsValue) dom.targetLufsValue.textContent = `${s.targetLufs} LUFS`;
   if (dom.inputGainValue) dom.inputGainValue.textContent = `${s.inputGain.toFixed(1)} dB`;
   if (dom.stereoWidthValue) dom.stereoWidthValue.textContent = `${s.stereoWidth}%`;
+  updateAdaptiveDynamicsDisplays();
 
   updateEQ();
   updateAudioChain();
@@ -202,6 +246,10 @@ const state = {
     masterRestorationDelta: null,
     restorationPreviewRequest: 0,
     analyser: null,
+    bypassSplitter: null,
+    bypassAnalyserLeft: null,
+    bypassAnalyserRight: null,
+    bypassMatchGain: 1,
     analyserLeft: null,
     analyserRight: null,
     splitter: null,
@@ -284,6 +332,19 @@ const dom = {
   cutMud: document.getElementById('cutMud'),
   addAir: document.getElementById('addAir'),
   tameHarsh: document.getElementById('tameHarsh'),
+  dynamicEq: document.getElementById('dynamicEq'),
+  dynamicEqAmount: document.getElementById('dynamicEqAmount'),
+  dynamicEqAmountValue: document.getElementById('dynamicEqAmountValue'),
+  deEsser: document.getElementById('deEsser'),
+  deEsserFrequency: document.getElementById('deEsserFrequency'),
+  deEsserFrequencyValue: document.getElementById('deEsserFrequencyValue'),
+  deEsserRange: document.getElementById('deEsserRange'),
+  deEsserRangeValue: document.getElementById('deEsserRangeValue'),
+  deEsserAttack: document.getElementById('deEsserAttack'),
+  deEsserAttackValue: document.getElementById('deEsserAttackValue'),
+  deEsserRelease: document.getElementById('deEsserRelease'),
+  deEsserReleaseValue: document.getElementById('deEsserReleaseValue'),
+  deEsserAudition: document.getElementById('deEsserAudition'),
   repairEdgeArtifacts: document.getElementById('repairEdgeArtifacts'),
   repairPrematureEnding: document.getElementById('repairPrematureEnding'),
   repairVocalCrackle: document.getElementById('repairVocalCrackle'),
@@ -364,6 +425,28 @@ function initAudioContext() {
   return state.audio.context;
 }
 
+function readMasterDynamicsSettings() {
+  return {
+    dynamicEq: dom.dynamicEq.checked,
+    dynamicEqAmount: parseInt(dom.dynamicEqAmount.value),
+    deEsser: dom.deEsser.checked,
+    deEsserFrequency: parseInt(dom.deEsserFrequency.value),
+    deEsserRange: parseFloat(dom.deEsserRange.value),
+    deEsserAttack: parseFloat(dom.deEsserAttack.value),
+    deEsserRelease: parseFloat(dom.deEsserRelease.value),
+    deEsserAudition: dom.deEsserAudition.checked
+  };
+}
+
+function updateAdaptiveDynamicsDisplays() {
+  if (!dom.dynamicEqAmount) return;
+  dom.dynamicEqAmountValue.textContent = `${dom.dynamicEqAmount.value}%`;
+  dom.deEsserFrequencyValue.textContent = `${(parseInt(dom.deEsserFrequency.value) / 1000).toFixed(1)} kHz`;
+  dom.deEsserRangeValue.textContent = `${parseFloat(dom.deEsserRange.value).toFixed(1)} dB`;
+  dom.deEsserAttackValue.textContent = `${parseFloat(dom.deEsserAttack.value).toFixed(0)} ms`;
+  dom.deEsserReleaseValue.textContent = `${parseFloat(dom.deEsserRelease.value).toFixed(0)} ms`;
+}
+
 // ─── Preview Audio Chain ────────────────────────────────────────────────────
 async function createAudioChain() {
   const ctx = initAudioContext();
@@ -372,6 +455,16 @@ async function createAudioChain() {
   state.audio.analyser = ctx.createAnalyser();
   state.audio.analyser.fftSize = 2048; // keep 2048 for spectrogram
   state.audio.analyser.smoothingTimeConstant = 0.3;
+
+  state.audio.bypassSplitter = ctx.createChannelSplitter(2);
+  state.audio.bypassAnalyserLeft = ctx.createAnalyser();
+  state.audio.bypassAnalyserRight = ctx.createAnalyser();
+  for (const analyser of [state.audio.bypassAnalyserLeft, state.audio.bypassAnalyserRight]) {
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0;
+  }
+  state.audio.bypassSplitter.connect(state.audio.bypassAnalyserLeft, 0);
+  state.audio.bypassSplitter.connect(state.audio.bypassAnalyserRight, 1);
 
   state.audio.splitter = ctx.createChannelSplitter(2);
   state.audio.analyserLeft = ctx.createAnalyser();
@@ -382,9 +475,15 @@ async function createAudioChain() {
   state.audio.analyserRight.fftSize = 512;
   state.audio.analyserRight.smoothingTimeConstant = 0;
 
+  await ensureStudioDynamicsWorklet(ctx);
+  const studioDynamics = createStudioDynamicsNode(
+    ctx,
+    createMasterDynamicsConfig(readMasterDynamicsSettings())
+  );
   const limiter = await createRealtimeLimiterNode(ctx);
   state.audio.nodes = createMasteringNodes(ctx, limiter, {
-    glueCompression: dom.glueCompression.checked
+    glueCompression: dom.glueCompression.checked,
+    studioDynamics
   });
   const nodes = state.audio.nodes;
 
@@ -398,9 +497,18 @@ function updateAudioChain() {
   const nodes = state.audio.nodes;
   const bypassed = state.ui.isBypassed;
 
-  if (nodes.inputGain && dom.inputGain) {
-    const inputDb = bypassed ? 0 : parseFloat(dom.inputGain.value);
-    nodes.inputGain.gain.value = Math.pow(10, inputDb / 20);
+  configureStudioDynamicsNode(
+    nodes.studioDynamics,
+    createMasterDynamicsConfig(readMasterDynamicsSettings(), bypassed)
+  );
+
+  const inputLinear = Math.pow(10, parseFloat(dom.inputGain.value) / 20);
+  const normalizationLinear = dom.normalizeLoudness.checked && state.file.normGain !== 1.0
+    ? state.file.normGain
+    : 1;
+  if (!bypassed) state.audio.bypassMatchGain = inputLinear * normalizationLinear;
+  if (nodes.inputGain) {
+    nodes.inputGain.gain.value = bypassed ? state.audio.bypassMatchGain : inputLinear;
   }
 
   nodes.highpass.frequency.value = (dom.cleanLowEnd.checked && !bypassed)
@@ -444,16 +552,13 @@ function updateAudioChain() {
   }
 
   if (nodes.normGain) {
-    if (dom.normalizeLoudness.checked && !bypassed && state.file.normGain !== 1.0) {
-      nodes.normGain.gain.value = state.file.normGain;
-    } else {
-      nodes.normGain.gain.value = 1.0;
-    }
+    nodes.normGain.gain.value = bypassed ? 1 : normalizationLinear;
   }
 }
 
 function connectAudioChain(source) {
   const nodes = state.audio.nodes;
+  source.connect(state.audio.bypassSplitter);
   if (nodes.graphConnected) {
     source.connect(nodes.inputGain);
     return;
@@ -580,6 +685,23 @@ function createDefaultStemSettings() {
     solo: false,
     cleanLowEnd: false,
     glueCompression: false,
+    compressionPreset: 'vocal',
+    compressorThreshold: STEM_COMPRESSION_PRESETS.vocal.thresholdDb,
+    compressorRatio: STEM_COMPRESSION_PRESETS.vocal.ratio,
+    compressorAttack: STEM_COMPRESSION_PRESETS.vocal.attackMs,
+    compressorRelease: STEM_COMPRESSION_PRESETS.vocal.releaseMs,
+    compressorKnee: STEM_COMPRESSION_PRESETS.vocal.kneeDb,
+    compressorMaxReduction: STEM_COMPRESSION_PRESETS.vocal.maxReductionDb,
+    compressorMix: STEM_COMPRESSION_PRESETS.vocal.mix,
+    compressorMakeup: STEM_COMPRESSION_PRESETS.vocal.makeupDb,
+    dynamicEq: false,
+    dynamicEqAmount: 50,
+    deEsser: false,
+    deEsserFrequency: 7000,
+    deEsserRange: 4,
+    deEsserAttack: 5,
+    deEsserRelease: 80,
+    deEsserAudition: false,
     cutMud: false,
     addAir: false,
     tameHarsh: false,
@@ -638,7 +760,7 @@ async function ensureStemBuffers(song) {
   }
 }
 
-function connectStemProcessingChain(context, source, stem, audible, destination) {
+function connectStemProcessingChain(context, source, stem, audible, destination, allowAudition = true) {
   const settings = stem.settings;
   const gain = context.createGain();
   gain.gain.value = audible ? Math.pow(10, settings.gainDb / 20) : 0;
@@ -687,15 +809,20 @@ function connectStemProcessingChain(context, source, stem, audible, destination)
   air.frequency.value = AUDIO_CONSTANTS.AIR_FREQ;
   air.gain.value = settings.addAir ? 2.5 : 0;
 
-  const compressor = context.createDynamicsCompressor();
-  compressor.threshold.value = settings.glueCompression ? AUDIO_CONSTANTS.GLUE_THRESHOLD : 0;
-  compressor.ratio.value = settings.glueCompression ? AUDIO_CONSTANTS.GLUE_RATIO : 1;
-  compressor.attack.value = AUDIO_CONSTANTS.GLUE_ATTACK;
-  compressor.release.value = AUDIO_CONSTANTS.GLUE_RELEASE;
+  const studioDynamics = createStudioDynamicsNode(
+    context,
+    createStemDynamicsConfig(settings, allowAudition),
+    meter => {
+      stem.compressionReductionDb = meter.compressorReductionDb;
+      stem.dynamicReductionDb = meter.dynamicReductionDb;
+      stem.deEsserReductionDb = meter.deEsserReductionDb;
+      updateSelectedStemMeters(stem);
+    }
+  );
 
   let current = source.connect(gain).connect(highpass);
   for (const eq of eqNodes) current = current.connect(eq);
-  current = current.connect(mud).connect(harsh).connect(harshHigh).connect(air).connect(compressor);
+  current = current.connect(mud).connect(harsh).connect(harshHigh).connect(air).connect(studioDynamics);
 
   const splitter = context.createChannelSplitter(2);
   const merger = context.createChannelMerger(2);
@@ -730,7 +857,7 @@ function connectStemProcessingChain(context, source, stem, audible, destination)
   panner.pan.value = settings.pan / 100;
   merger.connect(panner).connect(destination);
 
-  return { gain, highpass, eqNodes, mud, harsh, harshHigh, air, compressor, side, panner };
+  return { gain, highpass, eqNodes, mud, harsh, harshHigh, air, studioDynamics, side, panner };
 }
 
 function stemIsAudible(song, stem) {
@@ -760,16 +887,16 @@ function updateLiveStemSettings(song) {
     nodes.harsh.gain.setTargetAtTime(settings.tameHarsh ? AUDIO_CONSTANTS.HARSHNESS_GAIN_4K : 0, now, 0.012);
     nodes.harshHigh.gain.setTargetAtTime(settings.tameHarsh ? AUDIO_CONSTANTS.HARSHNESS_GAIN_6K : 0, now, 0.012);
     nodes.air.gain.setTargetAtTime(settings.addAir ? 2.5 : 0, now, 0.012);
-    nodes.compressor.threshold.setTargetAtTime(settings.glueCompression ? AUDIO_CONSTANTS.GLUE_THRESHOLD : 0, now, 0.012);
-    nodes.compressor.ratio.setTargetAtTime(settings.glueCompression ? AUDIO_CONSTANTS.GLUE_RATIO : 1, now, 0.012);
+    configureStudioDynamicsNode(nodes.studioDynamics, createStemDynamicsConfig(settings));
   }
 }
 
-async function renderStemSongMix(song, sampleRate = null) {
+async function renderStemSongMix(song, sampleRate = null, allowAudition = true) {
   await ensureStemBuffers(song);
   const rate = sampleRate || Math.max(...song.stems.map(stem => stem.buffer.sampleRate));
   const duration = Math.max(...song.stems.map(stem => stem.buffer.duration));
   const context = new OfflineAudioContext(2, Math.ceil(duration * rate), rate);
+  await ensureStudioDynamicsWorklet(context);
   for (const stem of song.stems) {
     const source = context.createBufferSource();
     const needsRestoration = stem.settings.repairEdgeArtifacts ||
@@ -787,7 +914,7 @@ async function renderStemSongMix(song, sampleRate = null) {
       source.buffer = stem.buffer;
     }
     const audible = stemIsAudible(song, stem);
-    connectStemProcessingChain(context, source, stem, audible, context.destination);
+    connectStemProcessingChain(context, source, stem, audible, context.destination, allowAudition);
     source.start(0);
   }
   return context.startRendering();
@@ -1262,21 +1389,40 @@ function startLevelMeters() {
   const bufferLength = state.audio.analyserLeft.frequencyBinCount;
   const dataArrayLeft = new Uint8Array(bufferLength);
   const dataArrayRight = new Uint8Array(bufferLength);
+  const bypassReferenceLeft = new Uint8Array(bufferLength);
+  const bypassReferenceRight = new Uint8Array(bufferLength);
 
   state.meters.interval = setInterval(() => {
     if (!state.playback.isPlaying) return;
 
     state.audio.analyserLeft.getByteTimeDomainData(dataArrayLeft);
     state.audio.analyserRight.getByteTimeDomainData(dataArrayRight);
+    state.audio.bypassAnalyserLeft?.getByteTimeDomainData(bypassReferenceLeft);
+    state.audio.bypassAnalyserRight?.getByteTimeDomainData(bypassReferenceRight);
 
     let peakL = 0;
     let peakR = 0;
+    let wetEnergy = 0;
+    let dryEnergy = 0;
 
     for (let i = 0; i < bufferLength; i++) {
       const normalizedL = (dataArrayLeft[i] - 128) / 128;
       const normalizedR = (dataArrayRight[i] - 128) / 128;
+      const normalizedDryLeft = (bypassReferenceLeft[i] - 128) / 128;
+      const normalizedDryRight = (bypassReferenceRight[i] - 128) / 128;
       peakL = Math.max(peakL, Math.abs(normalizedL));
       peakR = Math.max(peakR, Math.abs(normalizedR));
+      wetEnergy += (normalizedL * normalizedL + normalizedR * normalizedR) * 0.5;
+      dryEnergy += (normalizedDryLeft * normalizedDryLeft + normalizedDryRight * normalizedDryRight) * 0.5;
+    }
+
+    if (!state.ui.isBypassed) {
+      state.audio.bypassMatchGain = updateMatchedBypassGain(
+        state.audio.bypassMatchGain,
+        wetEnergy / bufferLength,
+        dryEnergy / bufferLength,
+        0.95
+      );
     }
 
     const dbL = peakL > 0 ? 20 * Math.log10(peakL) : -Infinity;
@@ -1566,13 +1712,15 @@ dom.waveformCanvas.addEventListener('click', (e) => {
   seekTo(time);
 });
 
-dom.bypassBtn.addEventListener('click', () => {
+function toggleMatchedBypass() {
   state.ui.isBypassed = !state.ui.isBypassed;
-  dom.bypassBtn.textContent = state.ui.isBypassed ? '🔇 FX Off' : '🔊 FX On';
+  dom.bypassBtn.textContent = state.ui.isBypassed ? '🔇 FX Off • Matched' : '🔊 FX On';
   dom.bypassBtn.classList.toggle('active', state.ui.isBypassed);
   updateAudioChain();
   updateEQ();
-});
+}
+
+dom.bypassBtn.addEventListener('click', toggleMatchedBypass);
 
 // ─── Offline Export: pre-master render, then loudness/true-peak final stage ──
 async function processAudioOffline(settings, inputBuffer = state.file.buffer) {
@@ -1594,11 +1742,18 @@ async function processAudioOffline(settings, inputBuffer = state.file.buffer) {
   const restoredInput = createRestoredInputBuffer(offlineCtx, inputBuffer, settings);
   source.buffer = restoredInput.buffer;
 
+  await ensureStudioDynamicsWorklet(offlineCtx);
+  const studioDynamics = createStudioDynamicsNode(
+    offlineCtx,
+    createMasterDynamicsConfig(settings)
+  );
+
   // The first pass uses the exact same corrective, dynamics, width, and
   // mono-bass graph as preview, but deliberately leaves loudness drive and
   // final limiting for the measured second stage below.
   const nodes = createMasteringNodes(offlineCtx, offlineCtx.createGain(), {
-    glueCompression: settings.glueCompression
+    glueCompression: settings.glueCompression,
+    studioDynamics
   });
   configureMasteringNodes(nodes, { ...settings, truePeakLimit: false });
   nodes.inputGain.gain.value = Math.pow(10, (settings.inputGain || 0) / 20);
@@ -1683,6 +1838,15 @@ dom.processBtn.addEventListener('click', async () => {
     cutMud: dom.cutMud.checked,
     addAir: dom.addAir.checked,
     tameHarsh: dom.tameHarsh.checked,
+    dynamicEq: dom.dynamicEq.checked,
+    dynamicEqAmount: parseInt(dom.dynamicEqAmount.value),
+    deEsser: dom.deEsser.checked,
+    deEsserFrequency: parseInt(dom.deEsserFrequency.value),
+    deEsserRange: parseFloat(dom.deEsserRange.value),
+    deEsserAttack: parseFloat(dom.deEsserAttack.value),
+    deEsserRelease: parseFloat(dom.deEsserRelease.value),
+    // Audition is a monitor path and is never written into an export.
+    deEsserAudition: false,
     repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
     repairPrematureEnding: dom.repairPrematureEnding.checked,
     repairVocalCrackle: dom.repairVocalCrackle.checked,
@@ -1699,7 +1863,7 @@ dom.processBtn.addEventListener('click', async () => {
     updateProgress(10);
 
     const songInput = state.file.stemSong
-      ? await renderStemSongMix(state.file.stemSong, settings.sampleRate)
+      ? await renderStemSongMix(state.file.stemSong, settings.sampleRate, false)
       : state.file.buffer;
     const processedBuffer = await processAudioOffline(settings, songInput);
     const masteringReport = masteringReports.get(processedBuffer);
@@ -1765,8 +1929,9 @@ const restorationControls = [
 ];
 
 [dom.normalizeLoudness, dom.truePeakLimit, dom.cleanLowEnd, dom.glueCompression,
- dom.centerBass, dom.cutMud, dom.addAir, dom.tameHarsh, dom.repairEdgeArtifacts,
- dom.repairPrematureEnding, dom.repairVocalCrackle].forEach(el => {
+ dom.centerBass, dom.cutMud, dom.addAir, dom.tameHarsh, dom.dynamicEq, dom.deEsser,
+ dom.deEsserAudition, dom.repairEdgeArtifacts, dom.repairPrematureEnding,
+ dom.repairVocalCrackle].forEach(el => {
   el.addEventListener('change', async () => {
     pushUndo();
     if (restorationControls.includes(el)) {
@@ -1960,11 +2125,7 @@ document.addEventListener('keydown', (e) => {
 
   // B = bypass toggle
   if (e.code === 'KeyB' && !e.ctrlKey && !e.metaKey) {
-    state.ui.isBypassed = !state.ui.isBypassed;
-    dom.bypassBtn.textContent = state.ui.isBypassed ? '🔇 FX Off' : '🔊 FX On';
-    dom.bypassBtn.classList.toggle('active', state.ui.isBypassed);
-    updateAudioChain();
-    updateEQ();
+    toggleMatchedBypass();
   }
 
   // Ctrl+Z = undo
@@ -2220,6 +2381,21 @@ function getQueueStatus(item) {
   };
 }
 
+function updateSelectedStemMeters(stem) {
+  const meter = batchDom.stemEditor.querySelector('[data-stem-gr-meter]');
+  if (!meter || meter.dataset.stemName !== stem.name) return;
+  const reduction = Math.max(0, stem.compressionReductionDb || 0);
+  const maximum = Math.max(1, stem.settings.compressorMaxReduction || 6);
+  meter.querySelector('.stem-gr-fill').style.width = `${Math.min(100, reduction / maximum * 100)}%`;
+  meter.querySelector('output').textContent = `-${reduction.toFixed(1)} dB`;
+  const adaptive = meter.querySelector('.stem-adaptive-meter');
+  if (adaptive) {
+    const dynamic = Math.max(0, ...(stem.dynamicReductionDb || [0]));
+    const deEsser = Math.max(0, stem.deEsserReductionDb || 0);
+    adaptive.textContent = `Dynamic EQ ${dynamic.toFixed(1)} dB • De-esser ${deEsser.toFixed(1)} dB`;
+  }
+}
+
 function renderStemEditor() {
   const song = batchState.queue.find(item => item.type === 'stem-song' && item.selectedStemIndex >= 0);
   if (!song || !song.stems[song.selectedStemIndex]) {
@@ -2258,7 +2434,6 @@ function renderStemEditor() {
     </div>
     <div class="stem-editor-toggles">
       ${toggle('cleanLowEnd', 'Clean Low End', 'High-pass this stem below 30Hz.')}
-      ${toggle('glueCompression', 'Compression', 'Apply light compression before the song master bus.')}
       ${toggle('cutMud', 'Cut Mud', 'Reduce 250Hz buildup on this stem.')}
       ${toggle('addAir', 'Add Air', 'Add a 12kHz shelf to this stem.')}
       ${toggle('tameHarsh', 'Tame Harshness', 'Reduce harsh 4–6kHz energy on this stem.')}
@@ -2270,6 +2445,40 @@ function renderStemEditor() {
       ${slider('eqMid', '1kHz', -12, 12, 1)}
       ${slider('eqHighMid', '4kHz', -12, 12, 1)}
       ${slider('eqHigh', '12kHz', -12, 12, 1)}
+    </div>
+    <div class="stem-editor-section-title">Adaptive Control</div>
+    <div class="stem-editor-toggles">
+      ${toggle('dynamicEq', '3-Band Dynamic EQ', 'React only when boom, boxiness, or harshness exceeds conservative thresholds.')}
+      ${toggle('deEsser', 'Vocal De-Esser', 'Stereo-linked control focused on vocal sibilance.')}
+      ${toggle('deEsserAudition', 'Audition Removed S', 'Monitor only the de-esser reduction signal. This is never included in exports.')}
+    </div>
+    <div class="stem-editor-dynamics">
+      ${slider('dynamicEqAmount', 'Dynamic Amount', 0, 100, 1, '%')}
+      ${slider('deEsserFrequency', 'De-ess Focus', 4000, 10000, 100, ' Hz')}
+      ${slider('deEsserRange', 'De-ess Range', 1, 10, 0.5)}
+      ${slider('deEsserAttack', 'De-ess Attack', 1, 30, 1, ' ms')}
+      ${slider('deEsserRelease', 'De-ess Release', 30, 300, 5, ' ms')}
+    </div>
+    <div class="stem-editor-section-title">Stem Compression</div>
+    <div class="stem-compression-heading">
+      ${toggle('glueCompression', 'Enable Compression', 'Range-limited, stereo-linked compression before the song master bus.')}
+      <div class="stem-preset-buttons" role="group" aria-label="Stem compression presets">
+        ${Object.keys(STEM_COMPRESSION_PRESETS).map(name => `<button class="stem-preset-btn${settings.compressionPreset === name ? ' active' : ''}" data-stem-compression-preset="${name}">${name[0].toUpperCase() + name.slice(1)}</button>`).join('')}
+      </div>
+    </div>
+    <div class="stem-editor-dynamics stem-compressor-controls">
+      ${slider('compressorThreshold', 'Threshold', -48, 0, 1)}
+      ${slider('compressorRatio', 'Ratio', 1, 20, 0.5, ':1')}
+      ${slider('compressorAttack', 'Attack', 1, 200, 1, ' ms')}
+      ${slider('compressorRelease', 'Release', 20, 1000, 5, ' ms')}
+      ${slider('compressorKnee', 'Knee', 0, 24, 1)}
+      ${slider('compressorMaxReduction', 'Max GR', 1, 12, 0.5)}
+      ${slider('compressorMix', 'Mix', 0, 100, 1, '%')}
+      ${slider('compressorMakeup', 'Makeup', -6, 6, 0.5)}
+    </div>
+    <div class="stem-gr-meter" data-stem-gr-meter data-stem-name="${escapeHTML(stem.name)}">
+      <span>Gain Reduction</span><div class="stem-gr-track"><div class="stem-gr-fill"></div></div><output>-${(stem.compressionReductionDb || 0).toFixed(1)} dB</output>
+      <span class="stem-adaptive-meter">Dynamic EQ ${Math.max(0, ...(stem.dynamicReductionDb || [0])).toFixed(1)} dB • De-esser ${(stem.deEsserReductionDb || 0).toFixed(1)} dB</span>
     </div>
     <div class="stem-editor-section-title">Stem Restoration</div>
     <div class="stem-editor-toggles">
@@ -2287,10 +2496,23 @@ function renderStemEditor() {
       stem.settings[key] = input.type === 'checkbox' ? input.checked : parseFloat(input.value);
       const output = input.parentElement.querySelector('output');
       if (output) {
-        const suffix = key === 'width' ? '%' : key === 'pan' ? '' : ' dB';
+        const suffix = ['width', 'dynamicEqAmount', 'compressorMix'].includes(key) ? '%'
+          : key === 'pan' ? ''
+            : key === 'compressorRatio' ? ':1'
+              : ['compressorAttack', 'compressorRelease', 'deEsserAttack', 'deEsserRelease'].includes(key) ? ' ms'
+                : key === 'deEsserFrequency' ? ' Hz' : ' dB';
         output.textContent = `${input.value}${suffix}`;
       }
       updateLiveStemSettings(song);
+      scheduleStemSongMix(song);
+    });
+  });
+
+  batchDom.stemEditor.querySelectorAll('[data-stem-compression-preset]').forEach(button => {
+    button.addEventListener('click', () => {
+      stem.settings = applyStemCompressionPreset(stem.settings, button.dataset.stemCompressionPreset);
+      updateLiveStemSettings(song);
+      renderStemEditor();
       scheduleStemSongMix(song);
     });
   });
@@ -2514,6 +2736,16 @@ batchDom.dropZone.addEventListener('drop', async (e) => {
   if (paths.length) await addFilesToBatch(paths);
 });
 
+[dom.dynamicEqAmount, dom.deEsserFrequency, dom.deEsserRange,
+ dom.deEsserAttack, dom.deEsserRelease].forEach(slider => {
+  slider.addEventListener('mousedown', () => pushUndo());
+  slider.addEventListener('input', () => {
+    updateAdaptiveDynamicsDisplays();
+    updateAudioChain();
+    saveSettingsToStorage();
+  });
+});
+
 // Helper: yield to the event loop so the UI can repaint
 function yieldToUI() {
   return new Promise(resolve => setTimeout(resolve, 0));
@@ -2556,6 +2788,14 @@ batchDom.exportBtn.addEventListener('click', async () => {
     cutMud: dom.cutMud.checked,
     addAir: dom.addAir.checked,
     tameHarsh: dom.tameHarsh.checked,
+    dynamicEq: dom.dynamicEq.checked,
+    dynamicEqAmount: parseInt(dom.dynamicEqAmount.value),
+    deEsser: dom.deEsser.checked,
+    deEsserFrequency: parseInt(dom.deEsserFrequency.value),
+    deEsserRange: parseFloat(dom.deEsserRange.value),
+    deEsserAttack: parseFloat(dom.deEsserAttack.value),
+    deEsserRelease: parseFloat(dom.deEsserRelease.value),
+    deEsserAudition: false,
     repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
     repairPrematureEnding: dom.repairPrematureEnding.checked,
     repairVocalCrackle: dom.repairVocalCrackle.checked,
@@ -2585,7 +2825,7 @@ batchDom.exportBtn.addEventListener('click', async () => {
     try {
       let audioBuffer;
       if (item.type === 'stem-song') {
-        audioBuffer = await renderStemSongMix(item, settings.sampleRate);
+        audioBuffer = await renderStemSongMix(item, settings.sampleRate, false);
       } else {
         const ctx = new AudioContext();
         audioBuffer = await decodeAudioPath(item.path, ctx);

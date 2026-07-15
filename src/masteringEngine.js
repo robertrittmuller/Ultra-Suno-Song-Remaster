@@ -5,6 +5,13 @@ const TRUE_PEAK_WORKLET_URL = new URL('./truePeakLimiter.worklet.js', import.met
 export const MONO_BASS_FREQUENCY = 120;
 export const GLUE_COMPRESSOR_LATENCY_SECONDS = 0.006;
 
+export function updateMatchedBypassGain(currentGain, wetEnergy, dryEnergy, smoothing = 0.9) {
+  if (!(wetEnergy > 1e-10) || !(dryEnergy > 1e-10)) return currentGain;
+  const measured = Math.max(0.25, Math.min(4, Math.sqrt(wetEnergy / dryEnergy)));
+  const blend = Math.max(0, Math.min(0.999, smoothing));
+  return currentGain * blend + measured * (1 - blend);
+}
+
 export async function createRealtimeLimiterNode(context) {
   if (context.audioWorklet && typeof AudioWorkletNode !== 'undefined') {
     try {
@@ -37,6 +44,7 @@ export function createMasteringNodes(context, limiter, options = {}) {
     highshelf: context.createBiquadFilter(),
     midPeak: context.createBiquadFilter(),
     midPeak2: context.createBiquadFilter(),
+    studioDynamics: options.studioDynamics || context.createGain(),
     // DynamicsCompressorNode has a fixed 6 ms lookahead even at 1:1. Use a
     // true GainNode bypass when glue is disabled so clean exports are not
     // delayed and truncated merely by passing through an inactive processor.
@@ -164,6 +172,7 @@ export function connectMasteringGraph(source, nodes) {
     .connect(nodes.midPeak)
     .connect(nodes.midPeak2)
     .connect(nodes.highshelf)
+    .connect(nodes.studioDynamics)
     .connect(nodes.compressor)
     .connect(nodes.stereoSplitter);
 

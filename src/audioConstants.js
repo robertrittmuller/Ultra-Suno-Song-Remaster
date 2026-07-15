@@ -61,6 +61,14 @@ export const DEFAULT_SETTINGS = {
   cutMud: false,
   addAir: false,
   tameHarsh: false,
+  dynamicEq: false,
+  dynamicEqAmount: 50,
+  deEsser: false,
+  deEsserFrequency: 7000,
+  deEsserRange: 4,
+  deEsserAttack: 5,
+  deEsserRelease: 80,
+  deEsserAudition: false,
   // Restoration is opt-in: analysis is conservative, but mastering should
   // never alter a source unless the engineer explicitly enables a treatment.
   repairEdgeArtifacts: false,
@@ -84,6 +92,11 @@ export function validateSettings(settings) {
   validated.targetLufs = Math.max(-20, Math.min(-6, validated.targetLufs));
   validated.inputGain = Math.max(-12, Math.min(12, validated.inputGain));
   validated.stereoWidth = Math.max(0, Math.min(200, validated.stereoWidth));
+  validated.dynamicEqAmount = Math.max(0, Math.min(100, validated.dynamicEqAmount));
+  validated.deEsserFrequency = Math.max(4000, Math.min(10000, validated.deEsserFrequency));
+  validated.deEsserRange = Math.max(1, Math.min(10, validated.deEsserRange));
+  validated.deEsserAttack = Math.max(1, Math.min(30, validated.deEsserAttack));
+  validated.deEsserRelease = Math.max(30, Math.min(300, validated.deEsserRelease));
   validated.eqLow = Math.max(-12, Math.min(12, validated.eqLow));
   validated.eqLowMid = Math.max(-12, Math.min(12, validated.eqLowMid));
   validated.eqMid = Math.max(-12, Math.min(12, validated.eqMid));
