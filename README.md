@@ -63,9 +63,32 @@ inventing a continuation.
 
 ## Building from Source
 
+### Prerequisites
+
+- Use Node.js **22, 24, or 26**. Node 26 is supported by the project; its
+  Electron installer needs the project post-install guard included here.
+- Ensure npm can access GitHub during installation. Electron downloads its
+  platform binary as part of its npm post-install step.
+
+Check your Node version before installing:
+
 ```bash
-# Install dependencies
-npm install
+node --version  # should print v22.x, v24.x, or v26.x
+```
+
+If you use `nvm`, for example, switch to Node 26 before continuing:
+
+```bash
+nvm install 26
+nvm use 26
+```
+
+### Install and run
+
+```bash
+# Install the exact locked dependencies. --foreground-scripts makes any
+# Electron download failure visible instead of leaving an incomplete install.
+npm ci --foreground-scripts
 
 # Build the app
 npm run build
@@ -75,8 +98,27 @@ npm run electron:dev
 
 # Build for your platform
 npm run electron:build:win    # Windows
-npm run electron:build:mac    # macOSnpm run electron:build:linux  # Linux
+npm run electron:build:mac    # macOS
+npm run electron:build:linux  # Linux
 ```
+
+### Electron installation recovery
+
+If `npm run electron:dev` reports `Electron failed to install correctly`, the
+Electron binary download did not complete (the expected
+`node_modules/electron/path.txt` file is missing). Reinstall from the
+lockfile:
+
+```bash
+rm -rf node_modules
+npm ci --foreground-scripts
+npm run electron:dev
+```
+
+Do not install with `--ignore-scripts`: that skips Electron's required
+post-install download and the Node 26 compatibility guard. If the reinstall
+still fails, check the output from `npm ci` for a network, proxy, firewall, or
+GitHub-download error.
 
 ## Tech Stack
 

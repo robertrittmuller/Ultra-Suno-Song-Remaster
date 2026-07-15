@@ -4,6 +4,7 @@
   "description": "AI-powered audio mastering app for music production",
   "main": "electron/main.js",
   "scripts": {
+    "postinstall": "node scripts/ensure-electron.js",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
