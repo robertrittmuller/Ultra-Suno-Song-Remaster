@@ -268,7 +268,8 @@ const state = {
     peakHoldRight: 0,
     peakHoldTimeLeft: 0,
     peakHoldTimeRight: 0,
-    spectrogramAnim: null
+    spectrogramAnim: null,
+    preserveSpectrogram: false
   },
   ui: {
     isBypassed: false
@@ -295,8 +296,10 @@ const dom = {
   playBtn: document.getElementById('playBtn'),
   stopBtn: document.getElementById('stopBtn'),
   playIcon: document.getElementById('playIcon'),
+  waveformContainer: document.getElementById('waveformContainer'),
   waveformCanvas: document.getElementById('waveformCanvas'),
   waveformProgress: document.getElementById('waveformProgress'),
+  waveformPlayhead: document.getElementById('waveformPlayhead'),
   currentTimeEl: document.getElementById('currentTime'),
   durationEl: document.getElementById('duration'),
   bypassBtn: document.getElementById('bypassBtn'),
@@ -935,6 +938,7 @@ async function activateAudioBuffer(buffer, metaPrefix = '') {
   updateRestorationPreview();
   state.file.duration = buffer.duration;
   dom.durationEl.textContent = formatTime(buffer.duration);
+  setPlaybackPosition(0);
 
   const lufsDisplay = isFinite(state.file.lufs) ? `${state.file.lufs.toFixed(1)} LUFS` : 'N/A';
   const prefix = metaPrefix ? `${metaPrefix} • ` : '';
@@ -1206,13 +1210,24 @@ function drawWaveform() {
 }
 
 // ─── Playback ───────────────────────────────────────────────────────────────
+function setPlaybackPosition(time) {
+  const duration = state.file.duration;
+  const safeTime = Math.max(0, Math.min(time || 0, duration || 0));
+  const progress = duration > 0 ? (safeTime / duration) * 100 : 0;
+
+  dom.waveformProgress.style.width = `${progress}%`;
+  dom.waveformPlayhead.style.left = `${progress}%`;
+  dom.currentTimeEl.textContent = formatTime(safeTime);
+  dom.waveformContainer.setAttribute('aria-valuenow', progress.toFixed(1));
+  dom.waveformContainer.setAttribute('aria-valuetext', `${formatTime(safeTime)} of ${formatTime(duration || 0)}`);
+}
+
 function finishPlayback() {
   if (!state.playback.isPlaying) return;
   state.playback.isPlaying = false;
   state.playback.pauseTime = 0;
   dom.playIcon.textContent = '▶';
-  dom.waveformProgress.style.width = '0%';
-  dom.currentTimeEl.textContent = '0:00';
+  setPlaybackPosition(0);
   clearInterval(state.playback.seekInterval);
   stopLevelMeters();
 }
@@ -1286,24 +1301,26 @@ function startPlaybackAt(offset) {
   state.playback.isPlaying = true;
   dom.playIcon.textContent = '⏸';
   if (liveStems) void updateLiveMasterRestorationPreview();
-  startLevelMeters();
+  const preserveSpectrogram = state.meters.preserveSpectrogram;
+  startLevelMeters({ preserveSpectrogram });
   startSeekUpdate();
-  startSpectrogram();
+  startSpectrogram({ preserve: preserveSpectrogram });
+  state.meters.preserveSpectrogram = false;
 }
 
 function playAudio() {
   if (!state.file.buffer || !state.audio.context) return;
-  stopAudio();
+  stopAudio({ preserveSpectrogram: state.meters.preserveSpectrogram });
   startPlaybackAt(state.playback.pauseTime);
 }
 
 function pauseAudio() {
   if (!state.playback.isPlaying) return;
   state.playback.pauseTime = state.audio.context.currentTime - state.playback.startTime;
-  stopAudio();
+  stopAudio({ preserveSpectrogram: true });
 }
 
-function stopAudio() {
+function stopAudio({ preserveSpectrogram = false } = {}) {
   state.audio.restorationPreviewRequest++;
   removeLiveMasterRestoration(false);
   if (state.audio.sourceNode) {
@@ -1330,7 +1347,8 @@ function stopAudio() {
   state.playback.isPlaying = false;
   dom.playIcon.textContent = '▶';
   clearInterval(state.playback.seekInterval);
-  stopLevelMeters();
+  stopLevelMeters({ clearSpectrogram: !preserveSpectrogram });
+  state.meters.preserveSpectrogram = preserveSpectrogram;
 }
 
 function startSeekUpdate() {
@@ -1342,31 +1360,27 @@ function startSeekUpdate() {
       if (currentTime >= state.file.duration) {
         stopAudio();
         state.playback.pauseTime = 0;
-        dom.waveformProgress.style.width = '0%';
-        dom.currentTimeEl.textContent = '0:00';
+        setPlaybackPosition(0);
       } else {
-        const progress = (currentTime / state.file.duration) * 100;
-        dom.waveformProgress.style.width = `${progress}%`;
-        dom.currentTimeEl.textContent = formatTime(currentTime);
+        setPlaybackPosition(currentTime);
       }
     }
   }, 100);
 }
 
-function seekTo(time) {
+function seekTo(time, { resume = state.playback.isPlaying } = {}) {
   time = Math.max(0, Math.min(time, state.file.duration));
-  const wasPlaying = state.playback.isPlaying;
 
   // Set seeking flag to prevent race conditions
   state.playback.isSeeking = true;
   state.playback.pauseTime = time;
 
-  dom.currentTimeEl.textContent = formatTime(time);
-  const progress = (time / state.file.duration) * 100;
-  dom.waveformProgress.style.width = `${progress}%`;
+  setPlaybackPosition(time);
 
-  if (wasPlaying) {
+  if (state.playback.isPlaying) {
     stopAudio();
+  }
+  if (resume) {
     startPlaybackAt(time);
   }
 
@@ -1381,10 +1395,10 @@ function formatTime(seconds) {
 }
 
 // ─── Level Meters ───────────────────────────────────────────────────────────
-function startLevelMeters() {
+function startLevelMeters({ preserveSpectrogram = false } = {}) {
   if (!state.audio.analyserLeft || !state.audio.analyserRight) return;
 
-  stopLevelMeters();
+  stopLevelMeters({ clearSpectrogram: !preserveSpectrogram });
 
   const bufferLength = state.audio.analyserLeft.frequencyBinCount;
   const dataArrayLeft = new Uint8Array(bufferLength);
@@ -1477,7 +1491,7 @@ function startLevelMeters() {
   }, 50);
 }
 
-function stopLevelMeters() {
+function stopLevelMeters({ clearSpectrogram = true } = {}) {
   if (state.meters.interval) {
     clearInterval(state.meters.interval);
     state.meters.interval = null;
@@ -1505,8 +1519,9 @@ function stopLevelMeters() {
   state.meters.peakHoldTimeLeft = 0;
   state.meters.peakHoldTimeRight = 0;
 
-  // Clear spectrogram
-  if (dom.spectrogramCanvas) {
+  // A pause should leave the current visualization visible so playback can
+  // continue from the same image when resumed. A true stop clears it.
+  if (clearSpectrogram && dom.spectrogramCanvas) {
     const sCtx = dom.spectrogramCanvas.getContext('2d');
     const isLight = document.documentElement.getAttribute('data-theme') === 'light';
     sCtx.fillStyle = isLight ? '#e8e8f0' : '#0a0a1a';
@@ -1515,7 +1530,7 @@ function stopLevelMeters() {
 }
 
 // ─── Spectrogram (complete implementation) ──────────────────────────────────
-function startSpectrogram() {
+function startSpectrogram({ preserve = false } = {}) {
   if (!state.audio.analyser || !dom.spectrogramCanvas) return;
 
   // Cancel any existing animation
@@ -1527,13 +1542,17 @@ function startSpectrogram() {
   const canvas = dom.spectrogramCanvas;
   const ctx = canvas.getContext('2d');
 
-  // Set canvas size to CSS pixel dimensions (no DPR scaling for spectrogram)
+  // Resizing a canvas clears it. Retain the paused visualization whenever the
+  // display size is unchanged, and use it to seed the next render buffer.
   const rect = canvas.getBoundingClientRect();
-  canvas.width = rect.width;
-  canvas.height = rect.height;
+  const width = Math.round(rect.width);
+  const height = Math.round(rect.height);
+  const preserveExisting = preserve && canvas.width === width && canvas.height === height;
+  if (!preserveExisting) {
+    canvas.width = width;
+    canvas.height = height;
+  }
 
-  const width = rect.width;
-  const height = rect.height;
 
   const analyser = state.audio.analyser;
   const bufferLength = analyser.frequencyBinCount;
@@ -1545,13 +1564,17 @@ function startSpectrogram() {
   offscreen.height = height;
   const offCtx = offscreen.getContext('2d');
 
-  // Clear both canvases
+  // Start fresh for a new playback, or copy the paused image for a resume.
   const isLight = document.documentElement.getAttribute('data-theme') === 'light';
   const specBg = isLight ? '#e8e8f0' : '#0a0a1a';
-  ctx.fillStyle = specBg;
-  ctx.fillRect(0, 0, width, height);
-  offCtx.fillStyle = specBg;
-  offCtx.fillRect(0, 0, width, height);
+  if (preserveExisting) {
+    offCtx.drawImage(canvas, 0, 0);
+  } else {
+    ctx.fillStyle = specBg;
+    ctx.fillRect(0, 0, width, height);
+    offCtx.fillStyle = specBg;
+    offCtx.fillRect(0, 0, width, height);
+  }
 
   // Throttle to ~30fps for performance
   let lastDrawTime = 0;
@@ -1697,20 +1720,53 @@ dom.playBtn.addEventListener('click', () => {
 dom.stopBtn.addEventListener('click', () => {
   stopAudio();
   state.playback.pauseTime = 0;
-  dom.waveformProgress.style.width = '0%';
-  dom.currentTimeEl.textContent = '0:00';
+  setPlaybackPosition(0);
 });
 
-dom.waveformCanvas.addEventListener('click', (e) => {
-  if (!state.file.buffer) return;
+function getWaveformTime(clientX) {
+  const rect = dom.waveformContainer.getBoundingClientRect();
+  if (!rect.width || !state.file.duration) return 0;
+  const percent = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  return percent * state.file.duration;
+}
 
-  const rect = dom.waveformCanvas.getBoundingClientRect();
-  const x = e.clientX - rect.left;
-  const percent = x / rect.width;
-  const time = percent * state.file.duration;
+let activeWaveformPointerId = null;
+let resumeAfterWaveformScrub = false;
+let waveformScrubTime = 0;
 
-  seekTo(time);
+dom.waveformContainer.addEventListener('pointerdown', (e) => {
+  if (!state.file.buffer || e.button !== 0) return;
+
+  e.preventDefault();
+  activeWaveformPointerId = e.pointerId;
+  resumeAfterWaveformScrub = state.playback.isPlaying;
+  dom.waveformContainer.setPointerCapture(e.pointerId);
+  dom.waveformContainer.classList.add('scrubbing');
+
+  if (resumeAfterWaveformScrub) stopAudio({ preserveSpectrogram: true });
+  waveformScrubTime = getWaveformTime(e.clientX);
+  setPlaybackPosition(waveformScrubTime);
 });
+
+dom.waveformContainer.addEventListener('pointermove', (e) => {
+  if (e.pointerId !== activeWaveformPointerId) return;
+  waveformScrubTime = getWaveformTime(e.clientX);
+  setPlaybackPosition(waveformScrubTime);
+});
+
+function finishWaveformScrub(e) {
+  if (e.pointerId !== activeWaveformPointerId) return;
+
+  const time = e.type === 'pointercancel' ? waveformScrubTime : getWaveformTime(e.clientX);
+  const shouldResume = resumeAfterWaveformScrub;
+  activeWaveformPointerId = null;
+  resumeAfterWaveformScrub = false;
+  dom.waveformContainer.classList.remove('scrubbing');
+  seekTo(time, { resume: shouldResume });
+}
+
+dom.waveformContainer.addEventListener('pointerup', finishWaveformScrub);
+dom.waveformContainer.addEventListener('pointercancel', finishWaveformScrub);
 
 function toggleMatchedBypass() {
   state.ui.isBypassed = !state.ui.isBypassed;
@@ -2119,8 +2175,7 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'Escape') {
     stopAudio();
     state.playback.pauseTime = 0;
-    dom.waveformProgress.style.width = '0%';
-    dom.currentTimeEl.textContent = '0:00';
+    setPlaybackPosition(0);
   }
 
   // B = bypass toggle

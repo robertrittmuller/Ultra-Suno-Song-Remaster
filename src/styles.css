@@ -463,6 +463,11 @@ html[data-platform="darwin"] .window-controls {
   border-radius: 5px;
   overflow: hidden;
   cursor: pointer;
+  touch-action: none;
+}
+
+.waveform-container.scrubbing {
+  cursor: grabbing;
 }
 
 #waveformCanvas {
@@ -480,6 +485,32 @@ html[data-platform="darwin"] .window-controls {
   pointer-events: none;
   width: 0%;
   transition: width 0.1s linear;
+}
+
+.waveform-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 2px;
+  background: #fff;
+  box-shadow: 0 0 5px rgba(255, 255, 255, 0.85);
+  pointer-events: none;
+  transform: translateX(-50%);
+  z-index: 2;
+}
+
+.waveform-playhead::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 50%;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 5px rgba(255, 255, 255, 0.85);
+  transform: translateX(-50%);
 }
 
 .waveform-time-overlay {
