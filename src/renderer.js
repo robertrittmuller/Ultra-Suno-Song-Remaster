@@ -2,9 +2,20 @@ import { AUDIO_CONSTANTS, validateSettings } from './audioConstants.js';
 import { measureLUFS, calculateNormalizationGain } from './lufs.js';
 import { encodeWAV } from './wavEncoder.js';
 import { createRestoredInputBuffer, repairPrematureEnding } from './audioRestoration.js';
+import {
+  MONO_BASS_FREQUENCY,
+  GLUE_COMPRESSOR_LATENCY_SECONDS,
+  configureMasteringNodes,
+  connectMasteringGraph,
+  createMasteringNodes,
+  createRealtimeLimiterNode,
+  setLimiterParameters
+} from './masteringEngine.js';
+import { finalizeMaster } from './truePeakLimiter.js';
 
 // ─── Settings Persistence ───────────────────────────────────────────────────
 const STORAGE_KEY = 'ai-mastering-settings';
+const masteringReports = new WeakMap();
 
 function saveSettingsToStorage() {
   try {
@@ -353,119 +364,8 @@ function initAudioContext() {
   return state.audio.context;
 }
 
-// ─── Shared Audio Chain Configuration (DRY) ─────────────────────────────────
-function configureEQNodes(nodes) {
-  nodes.eqLow.type = 'lowshelf';
-  nodes.eqLow.frequency.value = AUDIO_CONSTANTS.FREQ_LOW;
-
-  nodes.eqLowMid.type = 'peaking';
-  nodes.eqLowMid.frequency.value = AUDIO_CONSTANTS.FREQ_LOW_MID;
-  nodes.eqLowMid.Q.value = 1;
-
-  nodes.eqMid.type = 'peaking';
-  nodes.eqMid.frequency.value = AUDIO_CONSTANTS.FREQ_MID;
-  nodes.eqMid.Q.value = 1;
-
-  nodes.eqHighMid.type = 'peaking';
-  nodes.eqHighMid.frequency.value = AUDIO_CONSTANTS.FREQ_HIGH_MID;
-  nodes.eqHighMid.Q.value = 1;
-
-  nodes.eqHigh.type = 'highshelf';
-  nodes.eqHigh.frequency.value = AUDIO_CONSTANTS.FREQ_HIGH;
-}
-
-function configureFilterNodes(nodes, settings = null) {
-  const s = settings || {};
-
-  nodes.highpass.type = 'highpass';
-  nodes.highpass.frequency.value = (s.cleanLowEnd !== undefined ? s.cleanLowEnd : true)
-    ? AUDIO_CONSTANTS.HIGHPASS_FREQ : 1;
-  nodes.highpass.Q.value = 0.7;
-
-  nodes.lowshelf.type = 'peaking';
-  nodes.lowshelf.frequency.value = AUDIO_CONSTANTS.MUD_CUT_FREQ;
-  nodes.lowshelf.Q.value = 1.5;
-  nodes.lowshelf.gain.value = s.cutMud ? -3 : 0;
-
-  nodes.highshelf.type = 'highshelf';
-  nodes.highshelf.frequency.value = AUDIO_CONSTANTS.AIR_FREQ;
-  nodes.highshelf.gain.value = s.addAir ? 2.5 : 0;
-
-  nodes.midPeak.type = 'peaking';
-  nodes.midPeak.frequency.value = AUDIO_CONSTANTS.HARSHNESS_FREQ_1;
-  nodes.midPeak.Q.value = AUDIO_CONSTANTS.HARSHNESS_Q_4K;
-  nodes.midPeak.gain.value = s.tameHarsh ? AUDIO_CONSTANTS.HARSHNESS_GAIN_4K : 0;
-
-  nodes.midPeak2.type = 'peaking';
-  nodes.midPeak2.frequency.value = AUDIO_CONSTANTS.HARSHNESS_FREQ_2;
-  nodes.midPeak2.Q.value = AUDIO_CONSTANTS.HARSHNESS_Q_6K;
-  nodes.midPeak2.gain.value = s.tameHarsh ? AUDIO_CONSTANTS.HARSHNESS_GAIN_6K : 0;
-
-  if (s.glueCompression) {
-    nodes.compressor.threshold.value = AUDIO_CONSTANTS.GLUE_THRESHOLD;
-    nodes.compressor.knee.value = 10;
-    nodes.compressor.ratio.value = AUDIO_CONSTANTS.GLUE_RATIO;
-    nodes.compressor.attack.value = AUDIO_CONSTANTS.GLUE_ATTACK;
-    nodes.compressor.release.value = AUDIO_CONSTANTS.GLUE_RELEASE;
-  } else {
-    nodes.compressor.threshold.value = AUDIO_CONSTANTS.GLUE_THRESHOLD;
-    nodes.compressor.knee.value = 10;
-    nodes.compressor.ratio.value = AUDIO_CONSTANTS.GLUE_RATIO;
-    nodes.compressor.attack.value = AUDIO_CONSTANTS.GLUE_ATTACK;
-    nodes.compressor.release.value = AUDIO_CONSTANTS.GLUE_RELEASE;
-    // Will be overridden by updateAudioChain for preview
-  }
-
-  nodes.limiter.threshold.value = -1;
-  nodes.limiter.knee.value = 0;
-  nodes.limiter.ratio.value = AUDIO_CONSTANTS.LIMITER_RATIO;
-  nodes.limiter.attack.value = AUDIO_CONSTANTS.LIMITER_ATTACK;
-  nodes.limiter.release.value = AUDIO_CONSTANTS.LIMITER_RELEASE;
-}
-
-/**
- * Create all audio nodes for a given AudioContext.
- * Used by both real-time preview and offline export.
- */
-function createProcessingNodes(ctx) {
-  const nodes = {};
-  nodes.inputGain = ctx.createGain();
-  nodes.gain = ctx.createGain();
-  nodes.normGain = ctx.createGain();
-  nodes.highpass = ctx.createBiquadFilter();
-  nodes.lowshelf = ctx.createBiquadFilter();
-  nodes.highshelf = ctx.createBiquadFilter();
-  nodes.midPeak = ctx.createBiquadFilter();
-  nodes.midPeak2 = ctx.createBiquadFilter();
-  nodes.compressor = ctx.createDynamicsCompressor();
-  nodes.limiter = ctx.createDynamicsCompressor();
-
-  // Stereo width processing (mid-side)
-  nodes.stereoSplitter = ctx.createChannelSplitter(2);
-  nodes.stereoMerger = ctx.createChannelMerger(2);
-  nodes.midGain = ctx.createGain();
-  nodes.sideGain = ctx.createGain();
-  nodes.leftToMid = ctx.createGain();
-  nodes.rightToMid = ctx.createGain();
-  nodes.leftToSide = ctx.createGain();
-  nodes.rightToSide = ctx.createGain();
-  nodes.midToLeft = ctx.createGain();
-  nodes.midToRight = ctx.createGain();
-  nodes.sideToLeft = ctx.createGain();
-  nodes.sideToRight = ctx.createGain();
-
-  // 5-band EQ
-  nodes.eqLow = ctx.createBiquadFilter();
-  nodes.eqLowMid = ctx.createBiquadFilter();
-  nodes.eqMid = ctx.createBiquadFilter();
-  nodes.eqHighMid = ctx.createBiquadFilter();
-  nodes.eqHigh = ctx.createBiquadFilter();
-
-  return nodes;
-}
-
 // ─── Preview Audio Chain ────────────────────────────────────────────────────
-function createAudioChain() {
+async function createAudioChain() {
   const ctx = initAudioContext();
 
   // Analysers — use smaller FFT for level meters (faster)
@@ -482,12 +382,11 @@ function createAudioChain() {
   state.audio.analyserRight.fftSize = 512;
   state.audio.analyserRight.smoothingTimeConstant = 0;
 
-  // Create nodes using shared factory
-  state.audio.nodes = createProcessingNodes(ctx);
+  const limiter = await createRealtimeLimiterNode(ctx);
+  state.audio.nodes = createMasteringNodes(ctx, limiter, {
+    glueCompression: dom.glueCompression.checked
+  });
   const nodes = state.audio.nodes;
-
-  configureEQNodes(nodes);
-  configureFilterNodes(nodes);
 
   updateAudioChain();
   updateEQ();
@@ -518,27 +417,30 @@ function updateAudioChain() {
     nodes.midPeak2.gain.value = 0;
   }
 
-  if (dom.glueCompression.checked && !bypassed) {
+  if (nodes.compressor.threshold && dom.glueCompression.checked && !bypassed) {
     nodes.compressor.threshold.value = AUDIO_CONSTANTS.GLUE_THRESHOLD;
     nodes.compressor.ratio.value = AUDIO_CONSTANTS.GLUE_RATIO;
-  } else {
+  } else if (nodes.compressor.threshold) {
     nodes.compressor.threshold.value = 0;
     nodes.compressor.ratio.value = 1;
   }
 
-  if (dom.truePeakLimit.checked && !bypassed) {
-    const ceiling = parseFloat(dom.truePeakSlider.value);
-    nodes.limiter.threshold.value = ceiling;
-    nodes.limiter.ratio.value = AUDIO_CONSTANTS.LIMITER_RATIO;
-  } else {
-    nodes.limiter.threshold.value = 0;
-    nodes.limiter.ratio.value = 1;
-  }
+  setLimiterParameters(
+    nodes.limiter,
+    dom.truePeakLimit.checked && !bypassed,
+    parseFloat(dom.truePeakSlider.value)
+  );
 
   if (nodes.midGain && nodes.sideGain && dom.stereoWidth) {
     const width = bypassed ? 100 : parseInt(dom.stereoWidth.value);
     const sideLevel = width / 100;
     nodes.sideGain.gain.value = sideLevel;
+  }
+
+  if (nodes.sideBassHighpass1 && nodes.sideBassHighpass2) {
+    const frequency = dom.centerBass.checked && !bypassed ? MONO_BASS_FREQUENCY : 1;
+    nodes.sideBassHighpass1.frequency.value = frequency;
+    nodes.sideBassHighpass2.frequency.value = frequency;
   }
 
   if (nodes.normGain) {
@@ -552,67 +454,17 @@ function updateAudioChain() {
 
 function connectAudioChain(source) {
   const nodes = state.audio.nodes;
-
-  source
-    .connect(nodes.inputGain)
-    .connect(nodes.highpass)
-    .connect(nodes.eqLow)
-    .connect(nodes.eqLowMid)
-    .connect(nodes.eqMid)
-    .connect(nodes.eqHighMid)
-    .connect(nodes.eqHigh)
-    .connect(nodes.lowshelf)
-    .connect(nodes.midPeak)
-    .connect(nodes.midPeak2)
-    .connect(nodes.highshelf)
-    .connect(nodes.compressor)
-    .connect(nodes.limiter);
-
-  // Mid-side stereo width
-  nodes.limiter.connect(nodes.stereoSplitter);
-
-  nodes.stereoSplitter.connect(nodes.leftToMid, 0);
-  nodes.stereoSplitter.connect(nodes.rightToMid, 1);
-  nodes.leftToMid.gain.value = 0.5;
-  nodes.rightToMid.gain.value = 0.5;
-  nodes.leftToMid.connect(nodes.midGain);
-  nodes.rightToMid.connect(nodes.midGain);
-
-  nodes.stereoSplitter.connect(nodes.leftToSide, 0);
-  nodes.stereoSplitter.connect(nodes.rightToSide, 1);
-  nodes.leftToSide.gain.value = 0.5;
-  nodes.rightToSide.gain.value = -0.5;
-  nodes.leftToSide.connect(nodes.sideGain);
-  nodes.rightToSide.connect(nodes.sideGain);
-
-  nodes.midGain.gain.value = 1;
-  nodes.sideGain.gain.value = 1;
-
-  nodes.midToLeft.gain.value = 1;
-  nodes.midToRight.gain.value = 1;
-  nodes.sideToLeft.gain.value = 1;
-  nodes.sideToRight.gain.value = -1;
-
-  nodes.midGain.connect(nodes.midToLeft);
-  nodes.midGain.connect(nodes.midToRight);
-  nodes.sideGain.connect(nodes.sideToLeft);
-  nodes.sideGain.connect(nodes.sideToRight);
-
-  nodes.midToLeft.connect(nodes.stereoMerger, 0, 0);
-  nodes.sideToLeft.connect(nodes.stereoMerger, 0, 0);
-  nodes.midToRight.connect(nodes.stereoMerger, 0, 1);
-  nodes.sideToRight.connect(nodes.stereoMerger, 0, 1);
-
-  nodes.stereoMerger
-    .connect(nodes.normGain)
-    .connect(state.audio.analyser)
-    .connect(nodes.gain);
-
+  if (nodes.graphConnected) {
+    source.connect(nodes.inputGain);
+    return;
+  }
+  connectMasteringGraph(source, nodes);
+  nodes.gain.connect(state.audio.analyser);
   nodes.gain.connect(state.audio.splitter);
   state.audio.splitter.connect(state.audio.analyserLeft, 0);
   state.audio.splitter.connect(state.audio.analyserRight, 1);
-
   nodes.gain.connect(state.audio.context.destination);
+  nodes.graphConnected = true;
 }
 
 // ─── EQ ─────────────────────────────────────────────────────────────────────
@@ -947,12 +799,12 @@ async function activateAudioBuffer(buffer, metaPrefix = '') {
   state.file.restorationReport = null;
   dom.fileMeta.textContent = 'Analyzing loudness...';
 
-  const lufsResult = measureLUFS(buffer);
+  const lufsResult = measureLUFS(buffer, { truePeak: false });
   state.file.lufs = lufsResult.integratedLUFS;
   const targetLufs = dom.targetLufs ? parseInt(dom.targetLufs.value) : AUDIO_CONSTANTS.TARGET_LUFS;
   state.file.normGain = calculateNormalizationGain(state.file.lufs, targetLufs);
 
-  createAudioChain();
+  await createAudioChain();
   updateRestorationPreview();
   state.file.duration = buffer.duration;
   dom.durationEl.textContent = formatTime(buffer.duration);
@@ -1722,15 +1574,19 @@ dom.bypassBtn.addEventListener('click', () => {
   updateEQ();
 });
 
-// ─── Offline Export (uses shared node factory, no duplicate stereo width) ────
+// ─── Offline Export: pre-master render, then loudness/true-peak final stage ──
 async function processAudioOffline(settings, inputBuffer = state.file.buffer) {
   const targetSampleRate = settings.sampleRate;
   const numChannels = inputBuffer.numberOfChannels;
-
   const outputLength = Math.ceil(inputBuffer.length * targetSampleRate / inputBuffer.sampleRate);
-
-  const offlineCtx = new OfflineAudioContext(numChannels, outputLength, targetSampleRate);
-
+  const compressorLatencyFrames = settings.glueCompression
+    ? Math.ceil(targetSampleRate * GLUE_COMPRESSOR_LATENCY_SECONDS)
+    : 0;
+  const offlineCtx = new OfflineAudioContext(
+    numChannels,
+    outputLength + compressorLatencyFrames,
+    targetSampleRate
+  );
   const source = offlineCtx.createBufferSource();
   // Destructive restoration is performed on an export-only copy. This keeps
   // the loaded source and real-time audition intact while batch and single
@@ -1738,136 +1594,49 @@ async function processAudioOffline(settings, inputBuffer = state.file.buffer) {
   const restoredInput = createRestoredInputBuffer(offlineCtx, inputBuffer, settings);
   source.buffer = restoredInput.buffer;
 
-  // Use shared node factory
-  const nodes = createProcessingNodes(offlineCtx);
-
-  // Configure input gain
-  const inputGainDb = settings.inputGain || 0;
-  nodes.inputGain.gain.value = Math.pow(10, inputGainDb / 20);
-
-  // Configure EQ
-  configureEQNodes(nodes);
+  // The first pass uses the exact same corrective, dynamics, width, and
+  // mono-bass graph as preview, but deliberately leaves loudness drive and
+  // final limiting for the measured second stage below.
+  const nodes = createMasteringNodes(offlineCtx, offlineCtx.createGain(), {
+    glueCompression: settings.glueCompression
+  });
+  configureMasteringNodes(nodes, { ...settings, truePeakLimit: false });
+  nodes.inputGain.gain.value = Math.pow(10, (settings.inputGain || 0) / 20);
   nodes.eqLow.gain.value = settings.eqLow;
   nodes.eqLowMid.gain.value = settings.eqLowMid;
   nodes.eqMid.gain.value = settings.eqMid;
   nodes.eqHighMid.gain.value = settings.eqHighMid;
   nodes.eqHigh.gain.value = settings.eqHigh;
-
-  // Configure filters using shared function
-  configureFilterNodes(nodes, settings);
-
-  // Override compressor/limiter based on settings
-  if (settings.glueCompression) {
-    nodes.compressor.threshold.value = AUDIO_CONSTANTS.GLUE_THRESHOLD;
-    nodes.compressor.knee.value = 10;
-    nodes.compressor.ratio.value = AUDIO_CONSTANTS.GLUE_RATIO;
-    nodes.compressor.attack.value = AUDIO_CONSTANTS.GLUE_ATTACK;
-    nodes.compressor.release.value = AUDIO_CONSTANTS.GLUE_RELEASE;
-  } else {
-    nodes.compressor.threshold.value = 0;
-    nodes.compressor.ratio.value = 1;
-  }
-
-  if (settings.truePeakLimit) {
-    nodes.limiter.threshold.value = settings.truePeakCeiling;
-    nodes.limiter.knee.value = 0;
-    nodes.limiter.ratio.value = AUDIO_CONSTANTS.LIMITER_RATIO;
-    nodes.limiter.attack.value = AUDIO_CONSTANTS.LIMITER_ATTACK;
-    nodes.limiter.release.value = AUDIO_CONSTANTS.LIMITER_RELEASE;
-  } else {
-    nodes.limiter.threshold.value = 0;
-    nodes.limiter.ratio.value = 1;
-  }
-
-  nodes.normGain.gain.value = 1.0;
-
-  // Configure stereo width via mid-side nodes
-  const stereoWidth = settings.stereoWidth !== undefined ? settings.stereoWidth : 100;
-  const sideLevel = stereoWidth / 100;
-
-  // Connect the chain including mid-side processing
-  source
-    .connect(nodes.inputGain)
-    .connect(nodes.highpass)
-    .connect(nodes.eqLow)
-    .connect(nodes.eqLowMid)
-    .connect(nodes.eqMid)
-    .connect(nodes.eqHighMid)
-    .connect(nodes.eqHigh)
-    .connect(nodes.lowshelf)
-    .connect(nodes.midPeak)
-    .connect(nodes.midPeak2)
-    .connect(nodes.highshelf)
-    .connect(nodes.compressor)
-    .connect(nodes.limiter);
-
-  // Mid-side stereo width processing (same as preview chain)
-  nodes.limiter.connect(nodes.stereoSplitter);
-
-  nodes.stereoSplitter.connect(nodes.leftToMid, 0);
-  nodes.stereoSplitter.connect(nodes.rightToMid, 1);
-  nodes.leftToMid.gain.value = 0.5;
-  nodes.rightToMid.gain.value = 0.5;
-  nodes.leftToMid.connect(nodes.midGain);
-  nodes.rightToMid.connect(nodes.midGain);
-
-  nodes.stereoSplitter.connect(nodes.leftToSide, 0);
-  nodes.stereoSplitter.connect(nodes.rightToSide, 1);
-  nodes.leftToSide.gain.value = 0.5;
-  nodes.rightToSide.gain.value = -0.5;
-  nodes.leftToSide.connect(nodes.sideGain);
-  nodes.rightToSide.connect(nodes.sideGain);
-
   nodes.midGain.gain.value = 1;
-  nodes.sideGain.gain.value = sideLevel;
-
-  nodes.midToLeft.gain.value = 1;
-  nodes.midToRight.gain.value = 1;
-  nodes.sideToLeft.gain.value = 1;
-  nodes.sideToRight.gain.value = -1;
-
-  nodes.midGain.connect(nodes.midToLeft);
-  nodes.midGain.connect(nodes.midToRight);
-  nodes.sideGain.connect(nodes.sideToLeft);
-  nodes.sideGain.connect(nodes.sideToRight);
-
-  nodes.midToLeft.connect(nodes.stereoMerger, 0, 0);
-  nodes.sideToLeft.connect(nodes.stereoMerger, 0, 0);
-  nodes.midToRight.connect(nodes.stereoMerger, 0, 1);
-  nodes.sideToRight.connect(nodes.stereoMerger, 0, 1);
-
-  nodes.stereoMerger
-    .connect(nodes.normGain)
-    .connect(offlineCtx.destination);
-
+  nodes.sideGain.gain.value = (settings.stereoWidth ?? 100) / 100;
+  nodes.normGain.gain.value = 1;
+  connectMasteringGraph(source, nodes).connect(offlineCtx.destination);
   source.start(0);
-
-  let renderedBuffer = await offlineCtx.startRendering();
-
-  // Loudness normalization (post-render, using same target as preview)
-  if (settings.normalizeLoudness) {
-    const lufsResult = measureLUFS(renderedBuffer);
-    const targetLufs = settings.targetLufs || AUDIO_CONSTANTS.TARGET_LUFS;
-    const normGain = calculateNormalizationGain(lufsResult.integratedLUFS, targetLufs);
-
-    if (normGain !== 1.0 && isFinite(normGain)) {
-      for (let ch = 0; ch < renderedBuffer.numberOfChannels; ch++) {
-        const channelData = renderedBuffer.getChannelData(ch);
-        for (let i = 0; i < channelData.length; i++) {
-          channelData[i] *= normGain;
-        }
-      }
+  const untrimmedBuffer = await offlineCtx.startRendering();
+  let renderedBuffer = untrimmedBuffer;
+  if (compressorLatencyFrames) {
+    renderedBuffer = offlineCtx.createBuffer(numChannels, outputLength, targetSampleRate);
+    for (let channel = 0; channel < numChannels; channel++) {
+      renderedBuffer.getChannelData(channel).set(
+        untrimmedBuffer.getChannelData(channel).subarray(
+          compressorLatencyFrames,
+          compressorLatencyFrames + outputLength
+        )
+      );
     }
   }
 
-  // Run this last so a repaired ending reaches digital silence after every
-  // mastering stage. The detector declines naturally decaying or silent tails.
+  // Ending repair only reduces a detected tail, so it belongs before the
+  // measured loudness drive and final limiter.
   if (settings.repairPrematureEnding) {
     repairPrematureEnding(
       Array.from({ length: renderedBuffer.numberOfChannels }, (_, channel) => renderedBuffer.getChannelData(channel)),
       renderedBuffer.sampleRate
     );
   }
+
+  const masteringReport = finalizeMaster(renderedBuffer, settings);
+  masteringReports.set(renderedBuffer, masteringReport);
 
   return renderedBuffer;
 }
@@ -1879,6 +1648,15 @@ function getLoadedFileMetadata() {
   const queueItem = batchState.queue.find(q => q.path === state.file.path);
   if (queueItem && queueItem.metadata) return queueItem.metadata;
   return null;
+}
+
+function formatMasteringQc(report) {
+  if (!report?.verification?.analysis) return '';
+  const { integratedLUFS, truePeakDB } = report.verification.analysis;
+  const measurements = `${integratedLUFS.toFixed(1)} LUFS • ${truePeakDB.toFixed(2)} dBTP`;
+  return report.verification.warnings.length
+    ? `${measurements} • Warning: ${report.verification.warnings.join('; ')}`
+    : measurements;
 }
 
 dom.processBtn.addEventListener('click', async () => {
@@ -1924,6 +1702,10 @@ dom.processBtn.addEventListener('click', async () => {
       ? await renderStemSongMix(state.file.stemSong, settings.sampleRate)
       : state.file.buffer;
     const processedBuffer = await processAudioOffline(settings, songInput);
+    const masteringReport = masteringReports.get(processedBuffer);
+    if (masteringReport && !masteringReport.verification.passed) {
+      throw new Error(`Mastering QC failed: ${masteringReport.verification.warnings.join('; ')}`);
+    }
     updateProgress(60);
 
     const wavBuffer = encodeWAV(processedBuffer, {
@@ -1937,8 +1719,10 @@ dom.processBtn.addEventListener('click', async () => {
     await window.electronAPI.writeFile(outputPath, Array.from(uint8Array));
     updateProgress(100);
 
-    dom.statusMessage.textContent = '✓ Export complete! Your mastered file is ready.';
-    dom.statusMessage.className = 'status-message success visible';
+    const qcSummary = formatMasteringQc(masteringReport);
+    const hasWarnings = masteringReport?.verification?.warnings.length > 0;
+    dom.statusMessage.textContent = `${hasWarnings ? '⚠' : '✓'} Export complete${qcSummary ? ` • ${qcSummary}` : ''}`;
+    dom.statusMessage.className = `status-message ${hasWarnings ? 'warning' : 'success'} visible`;
     setTimeout(() => dom.statusMessage.classList.remove('visible'), 4000);
   } catch (error) {
     console.error('Export error:', error);
@@ -1983,7 +1767,7 @@ const restorationControls = [
 [dom.normalizeLoudness, dom.truePeakLimit, dom.cleanLowEnd, dom.glueCompression,
  dom.centerBass, dom.cutMud, dom.addAir, dom.tameHarsh, dom.repairEdgeArtifacts,
  dom.repairPrematureEnding, dom.repairVocalCrackle].forEach(el => {
-  el.addEventListener('change', () => {
+  el.addEventListener('change', async () => {
     pushUndo();
     if (restorationControls.includes(el)) {
       if (state.file.stemSong && state.playback.isPlaying) {
@@ -1994,7 +1778,15 @@ const restorationControls = [
         updateRestorationPreview();
       }
     }
-    updateAudioChain();
+    if (el === dom.glueCompression && state.file.buffer) {
+      // A real GainNode bypass avoids the Web Audio compressor's fixed 6 ms
+      // latency when glue is off, so changing this mode rebuilds the graph.
+      stopAudio();
+      state.playback.pauseTime = 0;
+      await createAudioChain();
+    } else {
+      updateAudioChain();
+    }
     updateChecklist();
     saveSettingsToStorage();
   });
@@ -2227,7 +2019,7 @@ Node: ${info.nodeVersion}
 Audio Processing:
 -----------------
 Engine: Pure JavaScript (Web Audio API)
-LUFS: ITU-R BS.1770-4 compliant
+LUFS/True Peak: ITU-R BS.1770-5 with post-render QC
 WAV Encoder: Native JavaScript (TPDF dithering)
 No FFmpeg dependency!
 
@@ -2779,12 +2571,7 @@ batchDom.exportBtn.addEventListener('click', async () => {
   const total = batchState.queue.length;
   let completed = 0;
   let errors = 0;
-
-  // Save original player state once
-  const origBuffer = state.file.buffer;
-  const origLufs = state.file.lufs;
-  const origNormGain = state.file.normGain;
-  const origStemSong = state.file.stemSong;
+  let qcWarnings = 0;
 
   for (let i = 0; i < total; i++) {
     const item = batchState.queue[i];
@@ -2806,17 +2593,13 @@ batchDom.exportBtn.addEventListener('click', async () => {
       }
       await yieldToUI();
 
-      // Measure LUFS
-      const lufsResult = measureLUFS(audioBuffer);
-      const targetLufs = settings.targetLufs || AUDIO_CONSTANTS.TARGET_LUFS;
-      await yieldToUI();
-
-      // Temporarily swap state for processAudioOffline
-      state.file.buffer = audioBuffer;
-      state.file.lufs = lufsResult.integratedLUFS;
-      state.file.normGain = calculateNormalizationGain(lufsResult.integratedLUFS, targetLufs);
-
       const processedBuffer = await processAudioOffline(settings, audioBuffer);
+      const masteringReport = masteringReports.get(processedBuffer);
+      if (masteringReport && !masteringReport.verification.passed) {
+        throw new Error(`Mastering QC failed: ${masteringReport.verification.warnings.join('; ')}`);
+      }
+      item.qc = formatMasteringQc(masteringReport);
+      if (masteringReport?.verification?.warnings.length) qcWarnings++;
       await yieldToUI();
 
       const wavBuffer = encodeWAV(processedBuffer, {
@@ -2848,19 +2631,13 @@ batchDom.exportBtn.addEventListener('click', async () => {
     await yieldToUI();
   }
 
-  // Restore original player state
-  state.file.buffer = origBuffer;
-  state.file.lufs = origLufs;
-  state.file.normGain = origNormGain;
-  state.file.stemSong = origStemSong;
-
   batchState.isProcessing = false;
   updateBatchButtons();
 
-  batchDom.progressText.textContent = `Done! ${completed} exported${errors ? `, ${errors} failed` : ''}`;
+  batchDom.progressText.textContent = `Done! ${completed} exported${errors ? `, ${errors} failed` : ''}${qcWarnings ? `, ${qcWarnings} QC warnings` : ''}`;
 
-  dom.statusMessage.textContent = `✓ Batch complete: ${completed}/${total} files exported.`;
-  dom.statusMessage.className = 'status-message success visible';
+  dom.statusMessage.textContent = `${qcWarnings ? '⚠' : '✓'} Batch complete: ${completed}/${total} files exported${qcWarnings ? ` with ${qcWarnings} QC warning${qcWarnings === 1 ? '' : 's'}` : ''}.`;
+  dom.statusMessage.className = `status-message ${qcWarnings ? 'warning' : 'success'} visible`;
   setTimeout(() => dom.statusMessage.classList.remove('visible'), 5000);
 
   setTimeout(() => {

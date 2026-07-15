@@ -8,7 +8,7 @@ export const AUDIO_CONSTANTS = {
   BIT_DEPTH_16: 16,
   BIT_DEPTH_24: 24,
   
-  // Loudness normalization (ITU-R BS.1770-4)
+  // Loudness normalization (ITU-R BS.1770-5)
   TARGET_LUFS: -14,
   TARGET_TRUE_PEAK: -1,
   TARGET_LRA: 11,
@@ -52,6 +52,9 @@ export const DEFAULT_SETTINGS = {
   normalizeLoudness: true,
   truePeakLimit: true,
   truePeakCeiling: -1.0,
+  targetLufs: AUDIO_CONSTANTS.TARGET_LUFS,
+  inputGain: 0,
+  stereoWidth: 100,
   cleanLowEnd: true,
   glueCompression: false,
   centerBass: false,
@@ -77,7 +80,10 @@ export function validateSettings(settings) {
   const validated = { ...DEFAULT_SETTINGS, ...settings };
   
   // Clamp values
-  validated.truePeakCeiling = Math.max(-3, Math.min(0, validated.truePeakCeiling));
+  validated.truePeakCeiling = Math.max(-6, Math.min(0, validated.truePeakCeiling));
+  validated.targetLufs = Math.max(-20, Math.min(-6, validated.targetLufs));
+  validated.inputGain = Math.max(-12, Math.min(12, validated.inputGain));
+  validated.stereoWidth = Math.max(0, Math.min(200, validated.stereoWidth));
   validated.eqLow = Math.max(-12, Math.min(12, validated.eqLow));
   validated.eqLowMid = Math.max(-12, Math.min(12, validated.eqLowMid));
   validated.eqMid = Math.max(-12, Math.min(12, validated.eqMid));

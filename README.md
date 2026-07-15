@@ -10,9 +10,9 @@ A professional desktop app for mastering AI-generated music to streaming-ready q
 - **Per-Stem Processing** - Gain, pan, width, mute/solo, EQ, cleanup, compression, polish, and restoration before the song master bus
 - **Metadata Editor** - Add title, artist, album, genre, year, track number, and comments per file
 - **Loudness Normalization** - Adjustable target LUFS (-20 to -6 LUFS)
-- **True Peak Limiting** - Prevents clipping with adjustable ceiling
+- **True Peak Limiting** - 4× inter-sample detection, linked lookahead limiting, and post-render dBTP verification
 - **Input Gain Control** - Adjust input level before processing (-12 to +12 dB)
-- **Stereo Width** - Control stereo image (0% mono to 200% extra wide)
+- **Stereo Width** - Control stereo image (0% mono to 200% extra wide) with optional 120Hz mono bass
 - **5-Band EQ** - Fine-tune with visual faders and presets (Flat, Vocal Boost, Bass Boost, Bright, Warm, AI Fix)
 - **Quick Fix Tools** - Glue compression, clean low end
 - **Polish Effects** - Cut mud, add air, tame harshness
@@ -20,6 +20,7 @@ A professional desktop app for mastering AI-generated music to streaming-ready q
 - **Real-time Preview** - Hear all changes live before exporting, preview any queued file
 - **Clipping Detection** - Visual CLIP indicators on meters
 - **High-Quality Export** - WAV output at 44.1/48kHz, 16/24-bit with embedded metadata
+- **Post-Render QC** - Verifies integrated LUFS, true peak, loudness range, and limiter gain reduction before writing
 
 ## Download
 
@@ -125,7 +126,7 @@ GitHub-download error.
 - Electron + Vite
 - Pure JavaScript audio processing (no FFmpeg)
 - Web Audio API for real-time preview
-- ITU-R BS.1770-4 compliant LUFS measurement
+- ITU-R BS.1770-5 loudness and Annex-2 true-peak measurement
 - Native JavaScript WAV encoder
 
 
