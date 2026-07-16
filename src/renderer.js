@@ -284,7 +284,8 @@ const state = {
   },
   ui: {
     isBypassed: false,
-    referenceActive: false
+    referenceActive: false,
+    fileLoadRequest: 0
   }
 };
 
@@ -302,6 +303,10 @@ const dom = {
   fileLoaded: document.getElementById('fileLoaded'),
   fileName: document.getElementById('fileName'),
   fileMeta: document.getElementById('fileMeta'),
+  fileLoadProgress: document.getElementById('fileLoadProgress'),
+  fileLoadProgressBar: document.getElementById('fileLoadProgressBar'),
+  fileLoadProgressFill: document.getElementById('fileLoadProgressFill'),
+  fileLoadProgressText: document.getElementById('fileLoadProgressText'),
   dropZone: document.getElementById('dropZone'),
 
   // Player
@@ -775,11 +780,56 @@ async function decodeAudioPath(filePath, context = initAudioContext()) {
   return context.decodeAudioData(audioData);
 }
 
-async function ensureStemBuffers(song) {
+function updateFileLoadProgress(percent, message) {
+  if (!dom.fileLoadProgress) return;
+  const safePercent = Math.max(0, Math.min(100, Math.round(percent)));
+  dom.fileLoadProgress.classList.remove('hidden');
+  dom.fileLoadProgressFill.style.width = `${safePercent}%`;
+  dom.fileLoadProgressText.textContent = message;
+  dom.fileLoadProgressBar.setAttribute('aria-valuenow', String(safePercent));
+  dom.fileLoadProgressBar.setAttribute('aria-valuetext', message);
+}
+
+function beginFileLoad(message) {
+  const request = ++state.ui.fileLoadRequest;
+  dom.playBtn.disabled = true;
+  dom.stopBtn.disabled = true;
+  dom.processBtn.disabled = true;
+  updateFileLoadProgress(2, message);
+  return request;
+}
+
+async function setFileLoadStage(request, percent, message) {
+  if (request !== state.ui.fileLoadRequest) return false;
+  updateFileLoadProgress(percent, message);
+  await yieldToUI();
+  return request === state.ui.fileLoadRequest;
+}
+
+async function finishFileLoad(request, succeeded) {
+  if (request !== state.ui.fileLoadRequest) return;
+  if (succeeded) {
+    await setFileLoadStage(request, 100, 'Ready to play');
+    setTimeout(() => {
+      if (request === state.ui.fileLoadRequest) dom.fileLoadProgress.classList.add('hidden');
+    }, 750);
+  } else {
+    dom.fileLoadProgress.classList.add('hidden');
+    dom.playBtn.disabled = !state.file.buffer;
+    dom.stopBtn.disabled = !state.file.buffer;
+    dom.processBtn.disabled = !state.file.buffer;
+  }
+}
+
+async function ensureStemBuffers(song, loadRequest = null) {
   const context = initAudioContext();
   for (let index = 0; index < song.stems.length; index++) {
     const stem = song.stems[index];
     if (stem.buffer) continue;
+    if (loadRequest !== null) {
+      const percent = 18 + (index / song.stems.length) * 42;
+      await setFileLoadStage(loadRequest, percent, `Decoding stem ${index + 1} of ${song.stems.length}`);
+    }
     if (state.file.stemSong === song) {
       dom.fileMeta.textContent = `Loading stem ${index + 1}/${song.stems.length}: ${stem.name}`;
     }
@@ -903,10 +953,11 @@ function updateLiveStemSettings(song) {
   }
 }
 
-async function renderStemSongMix(song, sampleRate = null, allowAudition = true) {
-  await ensureStemBuffers(song);
+async function renderStemSongMix(song, sampleRate = null, allowAudition = true, loadRequest = null) {
+  await ensureStemBuffers(song, loadRequest);
   const rate = sampleRate || Math.max(...song.stems.map(stem => stem.buffer.sampleRate));
   const duration = Math.max(...song.stems.map(stem => stem.buffer.duration));
+  if (loadRequest !== null) await setFileLoadStage(loadRequest, 64, 'Building the stem mix…');
   const context = new OfflineAudioContext(2, Math.ceil(duration * rate), rate);
   await Promise.all([
     ensureStudioDynamicsWorklet(context),
@@ -932,22 +983,29 @@ async function renderStemSongMix(song, sampleRate = null, allowAudition = true) 
     connectStemProcessingChain(context, source, stem, audible, context.destination, allowAudition);
     source.start(0);
   }
-  return context.startRendering();
+  if (loadRequest !== null) await setFileLoadStage(loadRequest, 72, 'Rendering the combined mix…');
+  const mix = await context.startRendering();
+  if (loadRequest !== null) await setFileLoadStage(loadRequest, 78, 'Preparing the player…');
+  return mix;
 }
 
-async function activateAudioBuffer(buffer, metaPrefix = '') {
+async function activateAudioBuffer(buffer, metaPrefix = '', { loadRequest = null, startProgress = 42 } = {}) {
   state.file.buffer = buffer;
   state.file.restorationPreviewBuffer = null;
   state.file.restorationReport = null;
   dom.fileMeta.textContent = 'Analyzing loudness...';
 
+  if (loadRequest !== null) await setFileLoadStage(loadRequest, startProgress, 'Measuring loudness…');
   const lufsResult = measureLUFS(buffer, { truePeak: false });
   state.file.lufs = lufsResult.integratedLUFS;
+  if (loadRequest !== null) await setFileLoadStage(loadRequest, Math.min(95, startProgress + 16), 'Analyzing frequency balance…');
   state.file.sourceSpectrum = calculateAverageSpectrum(buffer);
   const targetLufs = dom.targetLufs ? parseInt(dom.targetLufs.value) : AUDIO_CONSTANTS.TARGET_LUFS;
   state.file.normGain = calculateNormalizationGain(state.file.lufs, targetLufs);
 
+  if (loadRequest !== null) await setFileLoadStage(loadRequest, Math.min(95, startProgress + 30), 'Building playback preview…');
   await createAudioChain();
+  if (loadRequest !== null) await setFileLoadStage(loadRequest, Math.min(95, startProgress + 42), 'Applying preview settings…');
   updateRestorationPreview();
   state.file.duration = buffer.duration;
   dom.durationEl.textContent = formatTime(buffer.duration);
@@ -961,21 +1019,31 @@ async function activateAudioBuffer(buffer, metaPrefix = '') {
   dom.processBtn.disabled = false;
 }
 
-async function loadStemSong(song) {
-  stopAudio();
-  state.playback.pauseTime = 0;
-  state.file.path = song.path;
-  state.file.stemSong = song;
-  dom.fileName.textContent = song.name;
-  dom.fileMeta.textContent = `Loading ${song.stems.length} stems...`;
-  dom.fileZoneContent.classList.add('hidden');
-  dom.fileLoaded.classList.remove('hidden');
+async function loadStemSong(song, loadRequest = null) {
+  const ownsLoadProgress = loadRequest === null;
+  if (ownsLoadProgress) loadRequest = beginFileLoad(`Preparing ${song.name}…`);
 
-  const mix = await renderStemSongMix(song);
-  await activateAudioBuffer(mix, `${song.stems.length} stems`);
-  updateChecklist();
-  renderBatchList();
-  drawWaveform();
+  try {
+    stopAudio();
+    state.playback.pauseTime = 0;
+    state.file.path = song.path;
+    state.file.stemSong = song;
+    dom.fileName.textContent = song.name;
+    dom.fileMeta.textContent = `Loading ${song.stems.length} stems...`;
+    dom.fileZoneContent.classList.add('hidden');
+    dom.fileLoaded.classList.remove('hidden');
+
+    const mix = await renderStemSongMix(song, null, true, loadRequest);
+    await activateAudioBuffer(mix, `${song.stems.length} stems`, { loadRequest, startProgress: 80 });
+    await setFileLoadStage(loadRequest, 97, 'Drawing waveform…');
+    updateChecklist();
+    renderBatchList();
+    drawWaveform();
+    if (ownsLoadProgress) await finishFileLoad(loadRequest, true);
+  } catch (error) {
+    if (ownsLoadProgress) await finishFileLoad(loadRequest, false);
+    throw error;
+  }
 }
 
 function referencePlaybackGain() {
@@ -1059,10 +1127,11 @@ function scheduleStemSongMix(song) {
   song.mixDirty = true;
 }
 
-async function importSunoStemsArchive(archivePath, loadSong = false) {
+async function importSunoStemsArchive(archivePath, loadSong = false, loadRequest = null) {
   try {
     let song = batchState.queue.find(item => item.type === 'stem-song' && item.archivePath === archivePath);
     if (!song) {
+      if (loadRequest !== null) await setFileLoadStage(loadRequest, 8, 'Extracting Suno stems…');
       const stems = await window.electronAPI.importSunoStems(archivePath);
       if (stems.length === 0) throw new Error('No supported audio stems were found in this ZIP.');
       song = createStemSong(archivePath, stems);
@@ -1072,7 +1141,7 @@ async function importSunoStemsArchive(archivePath, loadSong = false) {
     }
     renderBatchList();
     renderMetaFileList();
-    if (loadSong) await loadStemSong(song);
+    if (loadSong) await loadStemSong(song, loadRequest);
 
     showFileStatus(`✓ Imported ${song.stems.length} stems as ${song.name}.`, 'success');
     return song;
@@ -1083,13 +1152,14 @@ async function importSunoStemsArchive(archivePath, loadSong = false) {
   }
 }
 
-async function loadAudioFile(filePath) {
+async function loadAudioFile(filePath, loadRequest = null) {
   const ctx = initAudioContext();
 
   try {
+    if (loadRequest !== null) await setFileLoadStage(loadRequest, 12, 'Reading and decoding audio…');
     const buffer = await decodeAudioPath(filePath, ctx);
     state.file.stemSong = null;
-    await activateAudioBuffer(buffer);
+    await activateAudioBuffer(buffer, '', { loadRequest, startProgress: 42 });
 
     return true;
   } catch (error) {
@@ -1128,15 +1198,16 @@ function updateRestorationStatus(settings, report) {
     messages.push(report.endingRepaired ? 'ending: fade repaired' : 'ending: no cutoff detected');
   }
   if (settings.repairVocalCrackle) {
-    messages.push(report.crackleSamples
-      ? `crackle: ${report.crackleSamples} samples repaired`
-      : 'crackle: no impulse noise detected');
+    const impulseSamples = report.impulseSamples ?? report.crackleSamples ?? 0;
+    messages.push(impulseSamples
+      ? `clicks/pops: ${impulseSamples} channel samples repaired`
+      : 'clicks/pops: no sparse impulses detected');
   }
 
   dom.restorationStatus.textContent = messages.length ? `Preview: ${messages.join(' · ')}` : 'Preview: restoration off';
   dom.restorationStatus.classList.toggle(
     'detected',
-    Boolean(report.edgeSamples || report.crackleSamples || report.endingRepaired)
+    Boolean(report.edgeSamples || report.impulseSamples || report.crackleSamples || report.endingRepaired)
   );
 }
 
@@ -1150,7 +1221,7 @@ function updateRestorationPreview() {
   const settings = getRestorationPreviewSettings();
   if (!settings.repairEdgeArtifacts && !settings.repairPrematureEnding && !settings.repairVocalCrackle) {
     state.file.restorationPreviewBuffer = null;
-    state.file.restorationReport = { edgeSamples: 0, crackleSamples: 0, endingRepaired: false };
+    state.file.restorationReport = { edgeSamples: 0, impulseSamples: 0, crackleSamples: 0, endingRepaired: false };
     updateRestorationStatus(settings, state.file.restorationReport);
     drawWaveform();
     return;
@@ -1220,13 +1291,13 @@ async function updateLiveMasterRestorationPreview() {
   const settings = getRestorationPreviewSettings();
   if (state.ui.isBypassed) {
     removeLiveMasterRestoration();
-    updateRestorationStatus(settings, { edgeSamples: 0, crackleSamples: 0, endingRepaired: false });
+    updateRestorationStatus(settings, { edgeSamples: 0, impulseSamples: 0, crackleSamples: 0, endingRepaired: false });
     return;
   }
   const request = ++state.audio.restorationPreviewRequest;
   if (!settings.repairEdgeArtifacts && !settings.repairPrematureEnding && !settings.repairVocalCrackle) {
     removeLiveMasterRestoration();
-    updateRestorationStatus(settings, { edgeSamples: 0, crackleSamples: 0, endingRepaired: false });
+    updateRestorationStatus(settings, { edgeSamples: 0, impulseSamples: 0, crackleSamples: 0, endingRepaired: false });
     return;
   }
 
@@ -1855,32 +1926,48 @@ dom.changeFileBtn.addEventListener('click', async () => {
 async function loadFile(filePath) {
   if (!filePath) return;
 
+  const name = filePath.split(/[\\/]/).pop();
+  const loadRequest = beginFileLoad(`Preparing ${name}…`);
+  dom.fileName.textContent = name;
+  dom.fileMeta.textContent = 'Loading...';
+  dom.fileZoneContent.classList.add('hidden');
+  dom.fileLoaded.classList.remove('hidden');
+
   if (SUNO_STEMS_ARCHIVE_PATTERN.test(filePath)) {
-    return importSunoStemsArchive(filePath, true);
+    try {
+      const song = await importSunoStemsArchive(filePath, true, loadRequest);
+      await finishFileLoad(loadRequest, Boolean(song) && !Array.isArray(song));
+      return song;
+    } catch (error) {
+      await finishFileLoad(loadRequest, false);
+      throw error;
+    }
   }
 
   state.file.path = filePath;
   state.file.stemSong = null;
 
   try {
-    const name = filePath.split(/[\\/]/).pop();
-    dom.fileName.textContent = name;
-    dom.fileMeta.textContent = 'Loading...';
-
-    dom.fileZoneContent.classList.add('hidden');
-    dom.fileLoaded.classList.remove('hidden');
-
-    await loadAudioFile(filePath);
+    const loaded = await loadAudioFile(filePath, loadRequest);
+    if (!loaded) {
+      await finishFileLoad(loadRequest, false);
+      return false;
+    }
+    await setFileLoadStage(loadRequest, 97, 'Drawing waveform…');
     updateChecklist();
 
     // Auto-add to batch queue so metadata can be edited
     ensureFileInQueue(filePath);
     renderBatchList();
+    await finishFileLoad(loadRequest, true);
+    return true;
   } catch (error) {
     console.error('Error loading file:', error);
     dom.statusMessage.textContent = `✗ Error: ${error.message}`;
     dom.statusMessage.className = 'status-message error visible';
     setTimeout(() => dom.statusMessage.classList.remove('visible'), 6000);
+    await finishFileLoad(loadRequest, false);
+    return false;
   }
 }
 
@@ -2767,7 +2854,7 @@ function renderStemEditor() {
     <div class="stem-editor-toggles">
       ${toggle('repairEdgeArtifacts', 'Repair Edges', 'Repair detected boundary clicks or bursts on this stem.')}
       ${toggle('repairPrematureEnding', 'Repair Cutoff', 'Apply a clean release only if this stem ends abruptly.')}
-      ${toggle('repairVocalCrackle', 'Repair Crackle', 'Repair detected impulses in quiet passages of this stem.')}
+      ${toggle('repairVocalCrackle', 'Repair Clicks & Pops', 'Repair sparse detected impulses without changing sustained texture.')}
     </div>
     <p class="stem-editor-note">Loudness normalization, true-peak limiting, and export format remain at song level.</p>
   `;

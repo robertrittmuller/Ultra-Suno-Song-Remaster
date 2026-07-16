@@ -21,7 +21,7 @@ A professional desktop app for mastering AI-generated music to streaming-ready q
 - **Reference A/B** - Load a commercial reference, switch playback at the same timeline position, loudness-match it, and compare average spectra
 - **Quick Fix Tools** - Glue compression, clean low end
 - **Polish Effects** - Cut mud, add air, tame harshness
-- **Analysis-Gated Restoration** - Optional stereo-linked boundary declicking, hard-cut ending repair, and quiet-passage decrackling
+- **Analysis-Gated Restoration** - Optional boundary declicking, hard-cut ending repair, and predictive click/pop repair
 - **Real-time Preview** - Hear all changes live before exporting, preview any queued file
 - **Clipping Detection** - Visual CLIP indicators on meters
 - **Album-Relative Normalization** - A two-pass batch mode calculates one shared gain so intentional song-to-song loudness differences are preserved
@@ -55,7 +55,9 @@ card. They are off by default, so a source is never altered unexpectedly.
 
 - **Repair Edge Artifacts** detects isolated impulses and short broadband static bursts at either boundary. Bursts are removed only when they are bracketed by silence; isolated impulses are reconstructed with slope-continuous interpolation.
 - **Repair Cutoff Ending** runs only when the last 50 ms is still audible and has not naturally decayed relative to the preceding audio. It applies a shaped 650 ms release that reaches digital silence without a new click.
-- **Repair Quiet Crackle** uses a stereo-linked, locally adaptive impulse detector in low-level passages. It avoids a broad noise gate, preserving vocal consonants and stereo placement.
+- **Repair Clicks & Pops** targets sparse sub-millisecond impulses with a locally adaptive autoregressive detector. A candidate must disagree with predictions from both the past and future, and sustained musical onsets are vetoed. Only the affected channel is repaired with bounded interpolation, so a left-only defect cannot alter clean right-channel audio and the replacement cannot overshoot into a new tick.
+
+Continuous high-frequency shimmer, sizzling, or codec-like texture is not treated as a run of clicks. Those artifacts overlap cymbals, strings, and vocal sibilance; automatic sample replacement would remove musical detail along with the noise. Use the click/pop repair for isolated events and audition the result before export.
 
 No restoration process can recreate musical material that is absent after a true
 cut. For that case, the ending repair provides a clean release rather than

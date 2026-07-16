@@ -379,6 +379,36 @@ html[data-platform="darwin"] .window-controls {
   margin-top: 1px;
 }
 
+.file-load-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0 1px 28px;
+}
+
+.file-load-progress-bar {
+  height: 5px;
+  flex: 1;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--slider-track-bg);
+}
+
+.file-load-progress-fill {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--theme-accent), var(--theme-accent-secondary));
+  transition: width 0.25s ease;
+}
+
+.file-load-progress-text {
+  min-width: 175px;
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .btn-change {
   background: var(--bg-card);
   color: var(--text-secondary);

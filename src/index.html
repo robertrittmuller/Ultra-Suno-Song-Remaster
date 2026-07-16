@@ -67,6 +67,12 @@
             <button id="changeFile" class="btn-change" aria-label="Change audio file">Change</button>
           </div>
         </div>
+        <div id="fileLoadProgress" class="file-load-progress hidden" aria-live="polite">
+          <div id="fileLoadProgressBar" class="file-load-progress-bar" role="progressbar" aria-label="Song loading progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div id="fileLoadProgressFill" class="file-load-progress-fill"></div>
+          </div>
+          <span id="fileLoadProgressText" class="file-load-progress-text">Preparing song…</span>
+        </div>
         <div class="audio-player" role="group" aria-label="Audio player controls">
           <button id="playBtn" class="btn-play-main" disabled aria-label="Play or pause (Space)">
             <span id="playIcon" aria-hidden="true">▶</span>
@@ -282,9 +288,9 @@
           <input type="checkbox" id="repairPrematureEnding" aria-label="Repair a detected premature ending with a smooth fade">
           <span class="toggle" aria-hidden="true"></span>
         </label>
-        <label class="toggle-row" data-tip="Adaptive decrackling for short impulse noise in quiet passages. Detection is linked across channels to preserve stereo placement; audition it before export.">
-          <span>Repair Quiet Crackle</span>
-          <input type="checkbox" id="repairVocalCrackle" aria-label="Repair detected crackle during quiet vocal passages">
+        <label class="toggle-row" data-tip="Repairs sparse sub-millisecond clicks and pops using agreement between forward and backward prediction. Musical attacks and sustained high-frequency texture are left intact; audition before export.">
+          <span>Repair Clicks &amp; Pops</span>
+          <input type="checkbox" id="repairVocalCrackle" aria-label="Repair detected clicks and pops">
           <span class="toggle" aria-hidden="true"></span>
         </label>
         <div class="restoration-status" id="restorationStatus" role="status" aria-live="polite">Preview: restoration off</div>

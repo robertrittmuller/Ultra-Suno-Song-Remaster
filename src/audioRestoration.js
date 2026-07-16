@@ -28,16 +28,192 @@ function linkedRms(channels, start, end) {
   return Math.sqrt(sum / length);
 }
 
-function linkedQuantile(channels, start, end, quantile) {
-  const values = [];
-  for (let i = start; i < end; i++) {
-    let peak = 0;
-    for (const channel of channels) peak = Math.max(peak, Math.abs(channel[i]));
-    values.push(peak);
-  }
+function quantile(values, amount) {
   if (!values.length) return 0;
   values.sort((a, b) => a - b);
-  return values[Math.min(values.length - 1, Math.floor((values.length - 1) * quantile))];
+  return values[Math.min(values.length - 1, Math.floor((values.length - 1) * amount))];
+}
+
+function solveLinearSystem(matrix, vector) {
+  const size = vector.length;
+  const rows = matrix.map((row, index) => [...row, vector[index]]);
+
+  for (let column = 0; column < size; column++) {
+    let pivot = column;
+    for (let row = column + 1; row < size; row++) {
+      if (Math.abs(rows[row][column]) > Math.abs(rows[pivot][column])) pivot = row;
+    }
+    if (Math.abs(rows[pivot][column]) < EPSILON) return null;
+    [rows[column], rows[pivot]] = [rows[pivot], rows[column]];
+
+    const divisor = rows[column][column];
+    for (let entry = column; entry <= size; entry++) rows[column][entry] /= divisor;
+    for (let row = 0; row < size; row++) {
+      if (row === column) continue;
+      const factor = rows[row][column];
+      for (let entry = column; entry <= size; entry++) {
+        rows[row][entry] -= factor * rows[column][entry];
+      }
+    }
+  }
+  return rows.map(row => row[size]);
+}
+
+// A short autoregressive model describes pitched and noisy musical material
+// much more accurately than raw waveform curvature. A small ridge term keeps
+// near-periodic frames numerically stable.
+function fitPredictionCoefficients(channel, start, end, order) {
+  const correlations = new Float64Array(order + 1);
+  let count = 0;
+  for (let index = Math.max(start + order, order); index < end; index += 2) {
+    for (let lag = 0; lag <= order; lag++) {
+      correlations[lag] += channel[index] * channel[index - lag];
+    }
+    count++;
+  }
+  if (!count || correlations[0] < EPSILON) return null;
+
+  const ridge = correlations[0] * 1e-4 + EPSILON;
+  const matrix = Array.from({ length: order }, (_, row) =>
+    Array.from({ length: order }, (_, column) =>
+      correlations[Math.abs(row - column)] + (row === column ? ridge : 0)
+    )
+  );
+  return solveLinearSystem(matrix, Array.from({ length: order }, (_, index) => correlations[index + 1]));
+}
+
+function predictionError(channel, index, coefficients, direction) {
+  let prediction = 0;
+  for (let lag = 0; lag < coefficients.length; lag++) {
+    prediction += coefficients[lag] * channel[index + direction * (lag + 1)];
+  }
+  return Math.abs(channel[index] - prediction);
+}
+
+function channelRms(channel, start, end) {
+  let sum = 0;
+  const safeStart = Math.max(0, start);
+  const safeEnd = Math.min(channel.length, end);
+  for (let index = safeStart; index < safeEnd; index++) sum += channel[index] * channel[index];
+  return Math.sqrt(sum / Math.max(1, safeEnd - safeStart));
+}
+
+function isMusicalAttack(channel, index, sampleRate) {
+  const near = Math.max(8, Math.round(sampleRate * 0.0015));
+  const far = Math.max(near, Math.round(sampleRate * 0.006));
+  const before = channelRms(channel, index - far, index - near);
+  const after = channelRms(channel, index + near, index + far);
+
+  // A real drum/cymbal onset has sustained energy after its first sample. An
+  // additive click is locally exceptional but does not create that envelope.
+  return after > 0.008 && after > Math.max(before * 2.8, before + 0.012);
+}
+
+function markPredictiveImpulses(channel, sampleRate) {
+  const length = channel.length;
+  const marks = new Uint8Array(length);
+  const interpolationOutliers = new Uint8Array(length);
+  const frameLength = Math.max(512, Math.round(sampleRate * 0.02));
+  const order = 8;
+  const padding = Math.max(order + 1, Math.round(sampleRate * 0.004));
+
+  for (let frameStart = padding; frameStart < length - padding; frameStart += frameLength) {
+    const frameEnd = Math.min(length - padding, frameStart + frameLength);
+    const analysisStart = Math.max(0, frameStart - padding);
+    const analysisEnd = Math.min(length, frameEnd + padding);
+    const coefficients = fitPredictionCoefficients(channel, analysisStart, analysisEnd, order);
+    if (!coefficients) continue;
+
+    const curvatures = [];
+    for (let index = frameStart; index < frameEnd; index++) {
+      curvatures.push(Math.abs(channel[index] - (channel[index - 1] + channel[index + 1]) * 0.5));
+    }
+    const curvatureCenter = quantile([...curvatures], 0.5);
+    const curvatureDeviations = curvatures.map(value => Math.abs(value - curvatureCenter));
+    const curvatureSigma = Math.max(EPSILON, quantile(curvatureDeviations, 0.5) * 1.4826);
+    const curvatureThreshold = Math.max(0.00075, curvatureCenter + curvatureSigma * 6);
+
+    // A sparse baseline is enough to estimate normal prediction error. Full
+    // bidirectional evaluation is then reserved for curvature outliers, which
+    // keeps multi-minute preview generation responsive.
+    const predictionScores = [];
+    for (let index = frameStart; index < frameEnd; index += 4) {
+      const forward = predictionError(channel, index, coefficients, -1);
+      const backward = predictionError(channel, index, coefficients, 1);
+      predictionScores.push(Math.min(forward, backward));
+    }
+    const predictionCenter = quantile([...predictionScores], 0.5);
+    const predictionDeviations = predictionScores.map(score => Math.abs(score - predictionCenter));
+    const predictionSigma = Math.max(EPSILON, quantile(predictionDeviations, 0.5) * 1.4826);
+    const localRms = channelRms(channel, frameStart, frameEnd);
+    const predictionThreshold = Math.max(
+      0.0015,
+      localRms * 0.025,
+      predictionCenter + predictionSigma * 11
+    );
+
+    for (let offset = 0; offset < curvatures.length; offset++) {
+      const index = frameStart + offset;
+      if (curvatures[offset] <= curvatureThreshold) continue;
+      interpolationOutliers[index] = 1;
+      const forward = predictionError(channel, index, coefficients, -1);
+      const backward = predictionError(channel, index, coefficients, 1);
+      // Agreement rejects the error smear that a one-sided predictor creates
+      // immediately before or after a defect.
+      if (
+        Math.min(forward, backward) <= predictionThreshold ||
+        isMusicalAttack(channel, index, sampleRate)
+      ) continue;
+      marks[index] = 1;
+    }
+  }
+
+  // Adjacent damaged samples can mask one another from a predictor. Once a
+  // high-confidence seed is found, include neighboring leave-one-out outliers
+  // within the maximum repairable click span.
+  const maxCluster = Math.max(3, Math.round(sampleRate * 0.00075));
+  const seeds = marks.slice();
+  for (let index = 0; index < seeds.length; index++) {
+    if (!seeds[index]) continue;
+    for (const direction of [-1, 1]) {
+      for (let distance = 1; distance < maxCluster; distance++) {
+        const neighbor = index + direction * distance;
+        if (neighbor <= 0 || neighbor >= length - 1 || !interpolationOutliers[neighbor]) break;
+        marks[neighbor] = 1;
+      }
+    }
+  }
+  return marks;
+}
+
+function bridgeOneSampleGaps(marks) {
+  for (let index = 1; index < marks.length - 1; index++) {
+    if (!marks[index] && marks[index - 1] && marks[index + 1]) marks[index] = 1;
+  }
+}
+
+function repairChannelRuns(channel, marks, maxRunLength) {
+  let repaired = 0;
+  for (let index = 1; index < marks.length - 1; index++) {
+    if (!marks[index]) continue;
+    const runStart = index;
+    while (index < marks.length - 1 && marks[index]) index++;
+    const runEnd = index - 1;
+    const runLength = runEnd - runStart + 1;
+    if (runLength > maxRunLength) continue;
+
+    const left = channel[runStart - 1];
+    const right = channel[runEnd + 1];
+    const distance = runLength + 1;
+    // Linear interpolation is intentionally bounded by its clean endpoints.
+    // For a sub-millisecond gap it is transparent, and unlike an unconstrained
+    // cubic it cannot overshoot and manufacture a second pop.
+    for (let offset = 1; offset <= runLength; offset++) {
+      channel[runStart + offset - 1] = left + (right - left) * (offset / distance);
+    }
+    repaired += runLength;
+  }
+  return repaired;
 }
 
 function boundaryFrameStats(channels, start, end) {
@@ -177,33 +353,28 @@ export function repairEdgeArtifacts(channels, sampleRate) {
 }
 
 /**
- * Repairs short, impulsive crackles only in low-level program material. The
- * local curvature threshold adapts to consonants and bright instrumentation;
- * wide-band musical detail is left untouched rather than noise-gated.
+ * Repairs sparse, sub-millisecond clicks and pops using bidirectional local
+ * prediction. Each channel is detected and repaired independently: a defect
+ * on the left cannot rewrite clean audio on the right. Sustained high-frequency
+ * texture is deliberately ignored because it requires spectral restoration,
+ * not destructive sample interpolation.
  */
-export function repairQuietCrackle(channels, sampleRate) {
+export function repairClicksAndPops(channels, sampleRate) {
   const length = channels[0]?.length || 0;
   if (length < sampleRate * 0.1) return 0;
 
-  const frameLength = Math.max(128, Math.round(sampleRate * 0.02));
-  const globalRms = linkedRms(channels, 0, length);
-  // This is deliberately conservative: "quiet" must be materially below the
-  // track RMS and below roughly -26 dBFS, whichever is lower.
-  const quietThreshold = Math.min(globalRms * 0.42, 0.05);
-  const marks = new Uint8Array(length);
-
-  for (let start = 1; start < length - 1; start += frameLength) {
-    const end = Math.min(length - 1, start + frameLength);
-    // RMS is deliberately not used here: a single large crackle would make an
-    // otherwise silent frame appear loud and evade detection. The 75th
-    // percentile describes the underlying programme level instead.
-    if (linkedQuantile(channels, start, end, 0.75) > quietThreshold) continue;
-    const frameMarks = markImpulses(channels, start, end, 8, 0.004);
-    for (let i = start; i < end; i++) marks[i] = frameMarks[i];
+  let repaired = 0;
+  const maxRunLength = Math.max(3, Math.round(sampleRate * 0.00075));
+  for (const channel of channels) {
+    const marks = markPredictiveImpulses(channel, sampleRate);
+    bridgeOneSampleGaps(marks);
+    repaired += repairChannelRuns(channel, marks, maxRunLength);
   }
-
-  return repairMarkedRuns(channels, marks, 1, length - 1, Math.max(8, Math.round(sampleRate * 0.001)));
+  return repaired;
 }
+
+// Kept for saved integrations that imported the old name directly.
+export const repairQuietCrackle = repairClicksAndPops;
 
 /**
  * Detects a non-decaying signal at the physical end of a song and applies a
@@ -253,8 +424,11 @@ export function createRestoredInputBuffer(context, inputBuffer, settings) {
     channels.push(output);
   }
 
-  const report = { edgeSamples: 0, crackleSamples: 0 };
+  const report = { edgeSamples: 0, impulseSamples: 0, crackleSamples: 0 };
   if (settings.repairEdgeArtifacts) report.edgeSamples = repairEdgeArtifacts(channels, inputBuffer.sampleRate);
-  if (settings.repairVocalCrackle) report.crackleSamples = repairQuietCrackle(channels, inputBuffer.sampleRate);
+  if (settings.repairVocalCrackle) {
+    report.impulseSamples = repairClicksAndPops(channels, inputBuffer.sampleRate);
+    report.crackleSamples = report.impulseSamples;
+  }
   return { buffer: restored, report };
 }
