@@ -48,7 +48,9 @@
 
   <!-- Main Content -->
   <main class="main-content" role="main">
-    <!-- File Drop Zone -->
+    <!-- Workspace and song-level controls share a sidebar on wide displays. -->
+    <div class="batch-master-layout">
+      <!-- File Drop Zone -->
     <div class="file-zone" id="dropZone" role="region" aria-label="Audio file drop zone">
       <div class="file-zone-content" id="fileZoneContent">
         <div class="drop-icon" aria-hidden="true">📁</div>
@@ -136,8 +138,8 @@
       <span>Ctrl+E: Export</span>
     </div>
 
-    <!-- Batch Processing Panel (Tabbed) -->
-    <div class="batch-panel" id="batchPanel" role="region" aria-label="Batch processing">
+      <!-- Batch Processing Panel (Tabbed) -->
+      <div class="batch-panel" id="batchPanel" role="region" aria-label="Batch processing">
       <div class="batch-header">
         <div class="batch-tabs" role="tablist" aria-label="Batch panel tabs">
           <button class="batch-tab active" id="tabQueue" role="tab" aria-selected="true" aria-controls="batchTabQueue">📦 Queue</button>
@@ -216,12 +218,13 @@
           </div>
         </div>
       </div>
-    </div>
+      </div>
 
-    <div class="master-scope-banner" role="note">
-      <span>SONG MASTER</span>
-      <p>The controls below process the combined stem mix. Use a stem’s Edit button for pre-master changes.</p>
-    </div>
+      <div class="master-controls">
+        <div class="master-scope-banner" role="note">
+          <span>SONG MASTER</span>
+          <p>The controls below process the combined stem mix. Use a stem’s Edit button for pre-master changes.</p>
+        </div>
 
     <!-- Settings Row 1 -->
     <div class="panel-grid" role="group" aria-label="Audio processing settings">
@@ -348,6 +351,8 @@
         <div class="select-row" data-tip="Album mode calculates one shared loudness gain for the complete batch, preserving intentional song-to-song level differences."><span>Batch Level</span><select id="batchNormalizationMode" aria-label="Batch loudness normalization mode"><option value="track">Per Track</option><option value="album">Album Relative</option></select></div>
       </div>
     </div>
+
+      </div>
 
     <!-- Settings Row 2: Loudness & EQ -->
     <div class="panel-grid-2">

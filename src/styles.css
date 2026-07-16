@@ -1867,6 +1867,39 @@ html[data-platform="darwin"] .window-controls {
   flex-shrink: 0;
 }
 
+/* On wide screens, keep song-level controls in a one-card-wide sidebar. */
+.batch-master-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.master-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+@media (min-width: 1280px) {
+  .batch-master-layout {
+    position: relative;
+    padding-right: 260px;
+  }
+
+  .master-controls {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 250px;
+  }
+
+  .master-controls .panel-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .stem-count-badge {
   padding: 2px 6px;
   border-radius: 999px;
