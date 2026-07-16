@@ -17,7 +17,7 @@ A professional desktop app for mastering AI-generated music to streaming-ready q
 - **3-Band Dynamic EQ** - Stereo-linked adaptive control for intermittent boom, boxiness, and harshness without permanent tonal cuts
 - **Dedicated De-Esser** - Adjustable 4–10kHz focus, maximum range, attack/release, and monitor-only reduction audition
 - **Stem-Aware Compression** - Vocal, Bass, Drums, and Music presets plus threshold, ratio, attack, release, knee, maximum reduction, parallel mix, makeup, and live gain-reduction metering
-- **Loudness-Matched Bypass** - Rolling wet/dry energy matching keeps FX comparisons from being biased by level changes
+- **True Original A/B** - FX Off routes the untouched source audio, bypassing restoration, stem processing, mastering, gain, normalization, and limiting
 - **Quick Fix Tools** - Glue compression, clean low end
 - **Polish Effects** - Cut mud, add air, tame harshness
 - **Analysis-Gated Restoration** - Optional stereo-linked boundary declicking, hard-cut ending repair, and quiet-passage decrackling

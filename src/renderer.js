@@ -9,8 +9,7 @@ import {
   connectMasteringGraph,
   createMasteringNodes,
   createRealtimeLimiterNode,
-  setLimiterParameters,
-  updateMatchedBypassGain
+  setLimiterParameters
 } from './masteringEngine.js';
 import { finalizeMaster } from './truePeakLimiter.js';
 import {
@@ -246,10 +245,6 @@ const state = {
     masterRestorationDelta: null,
     restorationPreviewRequest: 0,
     analyser: null,
-    bypassSplitter: null,
-    bypassAnalyserLeft: null,
-    bypassAnalyserRight: null,
-    bypassMatchGain: 1,
     analyserLeft: null,
     analyserRight: null,
     splitter: null,
@@ -459,16 +454,6 @@ async function createAudioChain() {
   state.audio.analyser.fftSize = 2048; // keep 2048 for spectrogram
   state.audio.analyser.smoothingTimeConstant = 0.3;
 
-  state.audio.bypassSplitter = ctx.createChannelSplitter(2);
-  state.audio.bypassAnalyserLeft = ctx.createAnalyser();
-  state.audio.bypassAnalyserRight = ctx.createAnalyser();
-  for (const analyser of [state.audio.bypassAnalyserLeft, state.audio.bypassAnalyserRight]) {
-    analyser.fftSize = 512;
-    analyser.smoothingTimeConstant = 0;
-  }
-  state.audio.bypassSplitter.connect(state.audio.bypassAnalyserLeft, 0);
-  state.audio.bypassSplitter.connect(state.audio.bypassAnalyserRight, 1);
-
   state.audio.splitter = ctx.createChannelSplitter(2);
   state.audio.analyserLeft = ctx.createAnalyser();
   state.audio.analyserLeft.fftSize = 512;
@@ -477,6 +462,8 @@ async function createAudioChain() {
   state.audio.analyserRight = ctx.createAnalyser();
   state.audio.analyserRight.fftSize = 512;
   state.audio.analyserRight.smoothingTimeConstant = 0;
+  state.audio.splitter.connect(state.audio.analyserLeft, 0);
+  state.audio.splitter.connect(state.audio.analyserRight, 1);
 
   await ensureStudioDynamicsWorklet(ctx);
   const studioDynamics = createStudioDynamicsNode(
@@ -498,29 +485,26 @@ function updateAudioChain() {
   if (!state.audio.context) return;
 
   const nodes = state.audio.nodes;
-  const bypassed = state.ui.isBypassed;
-
   configureStudioDynamicsNode(
     nodes.studioDynamics,
-    createMasterDynamicsConfig(readMasterDynamicsSettings(), bypassed)
+    createMasterDynamicsConfig(readMasterDynamicsSettings())
   );
 
   const inputLinear = Math.pow(10, parseFloat(dom.inputGain.value) / 20);
   const normalizationLinear = dom.normalizeLoudness.checked && state.file.normGain !== 1.0
     ? state.file.normGain
     : 1;
-  if (!bypassed) state.audio.bypassMatchGain = inputLinear * normalizationLinear;
   if (nodes.inputGain) {
-    nodes.inputGain.gain.value = bypassed ? state.audio.bypassMatchGain : inputLinear;
+    nodes.inputGain.gain.value = inputLinear;
   }
 
-  nodes.highpass.frequency.value = (dom.cleanLowEnd.checked && !bypassed)
+  nodes.highpass.frequency.value = dom.cleanLowEnd.checked
     ? AUDIO_CONSTANTS.HIGHPASS_FREQ : 1;
 
-  nodes.lowshelf.gain.value = (dom.cutMud.checked && !bypassed) ? -3 : 0;
-  nodes.highshelf.gain.value = (dom.addAir.checked && !bypassed) ? 2.5 : 0;
+  nodes.lowshelf.gain.value = dom.cutMud.checked ? -3 : 0;
+  nodes.highshelf.gain.value = dom.addAir.checked ? 2.5 : 0;
 
-  if (dom.tameHarsh.checked && !bypassed) {
+  if (dom.tameHarsh.checked) {
     nodes.midPeak.gain.value = AUDIO_CONSTANTS.HARSHNESS_GAIN_4K;
     nodes.midPeak2.gain.value = AUDIO_CONSTANTS.HARSHNESS_GAIN_6K;
   } else {
@@ -528,7 +512,7 @@ function updateAudioChain() {
     nodes.midPeak2.gain.value = 0;
   }
 
-  if (nodes.compressor.threshold && dom.glueCompression.checked && !bypassed) {
+  if (nodes.compressor.threshold && dom.glueCompression.checked) {
     nodes.compressor.threshold.value = AUDIO_CONSTANTS.GLUE_THRESHOLD;
     nodes.compressor.ratio.value = AUDIO_CONSTANTS.GLUE_RATIO;
   } else if (nodes.compressor.threshold) {
@@ -538,40 +522,47 @@ function updateAudioChain() {
 
   setLimiterParameters(
     nodes.limiter,
-    dom.truePeakLimit.checked && !bypassed,
+    dom.truePeakLimit.checked,
     parseFloat(dom.truePeakSlider.value)
   );
 
   if (nodes.midGain && nodes.sideGain && dom.stereoWidth) {
-    const width = bypassed ? 100 : parseInt(dom.stereoWidth.value);
+    const width = parseInt(dom.stereoWidth.value);
     const sideLevel = width / 100;
     nodes.sideGain.gain.value = sideLevel;
   }
 
   if (nodes.sideBassHighpass1 && nodes.sideBassHighpass2) {
-    const frequency = dom.centerBass.checked && !bypassed ? MONO_BASS_FREQUENCY : 1;
+    const frequency = dom.centerBass.checked ? MONO_BASS_FREQUENCY : 1;
     nodes.sideBassHighpass1.frequency.value = frequency;
     nodes.sideBassHighpass2.frequency.value = frequency;
   }
 
   if (nodes.normGain) {
-    nodes.normGain.gain.value = bypassed ? 1 : normalizationLinear;
+    nodes.normGain.gain.value = normalizationLinear;
   }
+}
+
+function connectPreviewOutput(source) {
+  source.connect(state.audio.analyser);
+  source.connect(state.audio.splitter);
+  source.connect(state.audio.context.destination);
 }
 
 function connectAudioChain(source) {
   const nodes = state.audio.nodes;
-  source.connect(state.audio.bypassSplitter);
+  // The original path deliberately bypasses every processing stage. This is
+  // an A/B reference, not a neutralized version of the mastering graph.
+  if (state.ui.isBypassed) {
+    connectPreviewOutput(source);
+    return;
+  }
   if (nodes.graphConnected) {
     source.connect(nodes.inputGain);
     return;
   }
   connectMasteringGraph(source, nodes);
-  nodes.gain.connect(state.audio.analyser);
-  nodes.gain.connect(state.audio.splitter);
-  state.audio.splitter.connect(state.audio.analyserLeft, 0);
-  state.audio.splitter.connect(state.audio.analyserRight, 1);
-  nodes.gain.connect(state.audio.context.destination);
+  connectPreviewOutput(nodes.gain);
   nodes.graphConnected = true;
 }
 
@@ -580,19 +571,11 @@ function updateEQ() {
   const nodes = state.audio.nodes;
   if (!nodes.eqLow) return;
 
-  if (state.ui.isBypassed) {
-    nodes.eqLow.gain.value = 0;
-    nodes.eqLowMid.gain.value = 0;
-    nodes.eqMid.gain.value = 0;
-    nodes.eqHighMid.gain.value = 0;
-    nodes.eqHigh.gain.value = 0;
-  } else {
-    nodes.eqLow.gain.value = parseFloat(dom.eqLow.value);
-    nodes.eqLowMid.gain.value = parseFloat(dom.eqLowMid.value);
-    nodes.eqMid.gain.value = parseFloat(dom.eqMid.value);
-    nodes.eqHighMid.gain.value = parseFloat(dom.eqHighMid.value);
-    nodes.eqHigh.gain.value = parseFloat(dom.eqHigh.value);
-  }
+  nodes.eqLow.gain.value = parseFloat(dom.eqLow.value);
+  nodes.eqLowMid.gain.value = parseFloat(dom.eqLowMid.value);
+  nodes.eqMid.gain.value = parseFloat(dom.eqMid.value);
+  nodes.eqHighMid.gain.value = parseFloat(dom.eqHighMid.value);
+  nodes.eqHigh.gain.value = parseFloat(dom.eqHigh.value);
 
   document.getElementById('eqLowVal').textContent = `${dom.eqLow.value} dB`;
   document.getElementById('eqLowMidVal').textContent = `${dom.eqLowMid.value} dB`;
@@ -1025,7 +1008,9 @@ function getRestorationPreviewSettings() {
 }
 
 function getPreviewBuffer() {
-  return state.file.restorationPreviewBuffer || state.file.buffer;
+  return state.ui.isBypassed
+    ? state.file.buffer
+    : state.file.restorationPreviewBuffer || state.file.buffer;
 }
 
 function updateRestorationStatus(settings, report) {
@@ -1130,6 +1115,11 @@ async function updateLiveMasterRestorationPreview() {
   if (!song || !state.playback.isPlaying || !state.audio.stemMixBus) return;
 
   const settings = getRestorationPreviewSettings();
+  if (state.ui.isBypassed) {
+    removeLiveMasterRestoration();
+    updateRestorationStatus(settings, { edgeSamples: 0, crackleSamples: 0, endingRepaired: false });
+    return;
+  }
   const request = ++state.audio.restorationPreviewRequest;
   if (!settings.repairEdgeArtifacts && !settings.repairPrematureEnding && !settings.repairVocalCrackle) {
     removeLiveMasterRestoration();
@@ -1234,7 +1224,9 @@ function finishPlayback() {
 
 function startSingleSourcePlayback(offset) {
   state.audio.sourceNode = state.audio.context.createBufferSource();
-  state.audio.sourceNode.buffer = getPreviewBuffer();
+  state.audio.sourceNode.buffer = state.ui.isBypassed
+    ? state.file.buffer
+    : getPreviewBuffer();
   connectAudioChain(state.audio.sourceNode);
   state.audio.sourceNode.onended = finishPlayback;
   state.audio.sourceNode.start(0, offset);
@@ -1275,9 +1267,17 @@ function startLiveStemPlayback(offset) {
   for (const stem of song.stems) {
     if (offset >= stem.buffer.duration) continue;
     const source = context.createBufferSource();
-    source.buffer = getStemLivePlaybackBuffer(context, stem);
-    const controls = connectStemProcessingChain(context, source, stem, stemIsAudible(song, stem), mixBus);
-    state.audio.stemNodeControls.set(stem, controls);
+    source.buffer = state.ui.isBypassed
+      ? stem.buffer
+      : getStemLivePlaybackBuffer(context, stem);
+    if (state.ui.isBypassed) {
+      // Stem gain, pan, mute/solo, restoration, EQ, dynamics, and width are
+      // all processing choices. The original reference contains none of them.
+      source.connect(mixBus);
+    } else {
+      const controls = connectStemProcessingChain(context, source, stem, stemIsAudible(song, stem), mixBus);
+      state.audio.stemNodeControls.set(stem, controls);
+    }
     state.audio.stemSourceNodes.push(source);
     remaining++;
     source.onended = () => {
@@ -1300,7 +1300,7 @@ function startPlaybackAt(offset) {
   state.playback.startTime = state.audio.context.currentTime - offset;
   state.playback.isPlaying = true;
   dom.playIcon.textContent = '⏸';
-  if (liveStems) void updateLiveMasterRestorationPreview();
+  if (liveStems && !state.ui.isBypassed) void updateLiveMasterRestorationPreview();
   const preserveSpectrogram = state.meters.preserveSpectrogram;
   startLevelMeters({ preserveSpectrogram });
   startSeekUpdate();
@@ -1403,40 +1403,21 @@ function startLevelMeters({ preserveSpectrogram = false } = {}) {
   const bufferLength = state.audio.analyserLeft.frequencyBinCount;
   const dataArrayLeft = new Uint8Array(bufferLength);
   const dataArrayRight = new Uint8Array(bufferLength);
-  const bypassReferenceLeft = new Uint8Array(bufferLength);
-  const bypassReferenceRight = new Uint8Array(bufferLength);
 
   state.meters.interval = setInterval(() => {
     if (!state.playback.isPlaying) return;
 
     state.audio.analyserLeft.getByteTimeDomainData(dataArrayLeft);
     state.audio.analyserRight.getByteTimeDomainData(dataArrayRight);
-    state.audio.bypassAnalyserLeft?.getByteTimeDomainData(bypassReferenceLeft);
-    state.audio.bypassAnalyserRight?.getByteTimeDomainData(bypassReferenceRight);
 
     let peakL = 0;
     let peakR = 0;
-    let wetEnergy = 0;
-    let dryEnergy = 0;
 
     for (let i = 0; i < bufferLength; i++) {
       const normalizedL = (dataArrayLeft[i] - 128) / 128;
       const normalizedR = (dataArrayRight[i] - 128) / 128;
-      const normalizedDryLeft = (bypassReferenceLeft[i] - 128) / 128;
-      const normalizedDryRight = (bypassReferenceRight[i] - 128) / 128;
       peakL = Math.max(peakL, Math.abs(normalizedL));
       peakR = Math.max(peakR, Math.abs(normalizedR));
-      wetEnergy += (normalizedL * normalizedL + normalizedR * normalizedR) * 0.5;
-      dryEnergy += (normalizedDryLeft * normalizedDryLeft + normalizedDryRight * normalizedDryRight) * 0.5;
-    }
-
-    if (!state.ui.isBypassed) {
-      state.audio.bypassMatchGain = updateMatchedBypassGain(
-        state.audio.bypassMatchGain,
-        wetEnergy / bufferLength,
-        dryEnergy / bufferLength,
-        0.95
-      );
     }
 
     const dbL = peakL > 0 ? 20 * Math.log10(peakL) : -Infinity;
@@ -1768,15 +1749,33 @@ function finishWaveformScrub(e) {
 dom.waveformContainer.addEventListener('pointerup', finishWaveformScrub);
 dom.waveformContainer.addEventListener('pointercancel', finishWaveformScrub);
 
-function toggleMatchedBypass() {
+function toggleOriginalPreview() {
+  const wasPlaying = state.playback.isPlaying;
+  const position = wasPlaying
+    ? Math.max(0, state.audio.context.currentTime - state.playback.startTime)
+    : state.playback.pauseTime;
   state.ui.isBypassed = !state.ui.isBypassed;
-  dom.bypassBtn.textContent = state.ui.isBypassed ? '🔇 FX Off • Matched' : '🔊 FX On';
+  dom.bypassBtn.textContent = state.ui.isBypassed ? '🔇 FX Off • Original' : '🔊 FX On';
+  dom.bypassBtn.setAttribute(
+    'aria-label',
+    state.ui.isBypassed
+      ? 'FX off: playing the unmodified original (B)'
+      : 'FX on: playing the processed preview (B)'
+  );
+  dom.bypassBtn.setAttribute('aria-pressed', String(state.ui.isBypassed));
   dom.bypassBtn.classList.toggle('active', state.ui.isBypassed);
-  updateAudioChain();
-  updateEQ();
+  drawWaveform();
+  if (wasPlaying) {
+    // Buffer sources cannot be rewired after they start. Recreate them at the
+    // same position so this switch can include upstream restoration and stem
+    // processing as well as the master chain.
+    stopAudio({ preserveSpectrogram: true });
+    state.playback.pauseTime = position;
+    startPlaybackAt(position);
+  }
 }
 
-dom.bypassBtn.addEventListener('click', toggleMatchedBypass);
+dom.bypassBtn.addEventListener('click', toggleOriginalPreview);
 
 // ─── Offline Export: pre-master render, then loudness/true-peak final stage ──
 async function processAudioOffline(settings, inputBuffer = state.file.buffer) {
@@ -2180,7 +2179,7 @@ document.addEventListener('keydown', (e) => {
 
   // B = bypass toggle
   if (e.code === 'KeyB' && !e.ctrlKey && !e.metaKey) {
-    toggleMatchedBypass();
+    toggleOriginalPreview();
   }
 
   // Ctrl+Z = undo
