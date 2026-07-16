@@ -5,6 +5,7 @@ import { createRestoredInputBuffer, repairPrematureEnding } from './audioRestora
 import {
   MONO_BASS_FREQUENCY,
   GLUE_COMPRESSOR_LATENCY_SECONDS,
+  configureStereoImaging,
   configureMasteringNodes,
   connectMasteringGraph,
   createMasteringNodes,
@@ -21,10 +22,22 @@ import {
   createStudioDynamicsNode,
   ensureStudioDynamicsWorklet
 } from './studioDynamics.js';
+import {
+  applyEqPreset,
+  cloneDefaultEqBands,
+  configureParametricEqNode,
+  createParametricEqNode,
+  ensureParametricEqWorklet,
+  sanitizeEqBands
+} from './parametricEq.js';
+import { applyDeliveryProfile, DELIVERY_PROFILES, resolveOutputSampleRate } from './deliveryProfiles.js';
+import { calculateAlbumNormalizationGain } from './albumNormalization.js';
+import { calculateAverageSpectrum } from './spectrumAnalysis.js';
 
 // ─── Settings Persistence ───────────────────────────────────────────────────
 const STORAGE_KEY = 'ai-mastering-settings';
 const masteringReports = new WeakMap();
+let masterEqBands = cloneDefaultEqBands();
 
 function saveSettingsToStorage() {
   try {
@@ -34,7 +47,9 @@ function saveSettingsToStorage() {
       truePeakCeiling: parseFloat(dom.truePeakSlider.value),
       targetLufs: dom.targetLufs ? parseInt(dom.targetLufs.value) : -14,
       inputGain: dom.inputGain ? parseFloat(dom.inputGain.value) : 0,
-      stereoWidth: dom.stereoWidth ? parseInt(dom.stereoWidth.value) : 100,
+      stereoWidthLow: parseInt(dom.stereoWidthLow.value),
+      stereoWidthMid: parseInt(dom.stereoWidthMid.value),
+      stereoWidthHigh: parseInt(dom.stereoWidthHigh.value),
       cleanLowEnd: dom.cleanLowEnd.checked,
       glueCompression: dom.glueCompression.checked,
       centerBass: dom.centerBass.checked,
@@ -52,13 +67,11 @@ function saveSettingsToStorage() {
       repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
       repairPrematureEnding: dom.repairPrematureEnding.checked,
       repairVocalCrackle: dom.repairVocalCrackle.checked,
+      deliveryProfile: dom.deliveryProfile.value,
+      batchNormalizationMode: dom.batchNormalizationMode.value,
       sampleRate: parseInt(dom.sampleRate.value),
       bitDepth: parseInt(dom.bitDepth.value),
-      eqLow: parseFloat(dom.eqLow.value),
-      eqLowMid: parseFloat(dom.eqLowMid.value),
-      eqMid: parseFloat(dom.eqMid.value),
-      eqHighMid: parseFloat(dom.eqHighMid.value),
-      eqHigh: parseFloat(dom.eqHigh.value),
+      eqBands: masterEqBands.map(band => ({ ...band })),
       activePreset: document.querySelector('.preset-btn.active')?.dataset.preset || 'flat'
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
@@ -91,21 +104,22 @@ function loadSettingsFromStorage() {
     if (s.truePeakCeiling !== undefined) dom.truePeakSlider.value = s.truePeakCeiling;
     if (s.targetLufs !== undefined && dom.targetLufs) dom.targetLufs.value = s.targetLufs;
     if (s.inputGain !== undefined && dom.inputGain) dom.inputGain.value = s.inputGain;
-    if (s.stereoWidth !== undefined && dom.stereoWidth) dom.stereoWidth.value = s.stereoWidth;
+    const legacyWidth = s.stereoWidth ?? 100;
+    dom.stereoWidthLow.value = s.stereoWidthLow ?? Math.min(100, legacyWidth);
+    dom.stereoWidthMid.value = s.stereoWidthMid ?? legacyWidth;
+    dom.stereoWidthHigh.value = s.stereoWidthHigh ?? legacyWidth;
     if (s.dynamicEqAmount !== undefined) dom.dynamicEqAmount.value = s.dynamicEqAmount;
     if (s.deEsserFrequency !== undefined) dom.deEsserFrequency.value = s.deEsserFrequency;
     if (s.deEsserRange !== undefined) dom.deEsserRange.value = s.deEsserRange;
     if (s.deEsserAttack !== undefined) dom.deEsserAttack.value = s.deEsserAttack;
     if (s.deEsserRelease !== undefined) dom.deEsserRelease.value = s.deEsserRelease;
+    if (s.deliveryProfile && DELIVERY_PROFILES[s.deliveryProfile]) dom.deliveryProfile.value = s.deliveryProfile;
+    if (['track', 'album'].includes(s.batchNormalizationMode)) dom.batchNormalizationMode.value = s.batchNormalizationMode;
     if (s.sampleRate !== undefined) dom.sampleRate.value = s.sampleRate;
     if (s.bitDepth !== undefined) dom.bitDepth.value = s.bitDepth;
 
-    // EQ
-    if (s.eqLow !== undefined) dom.eqLow.value = s.eqLow;
-    if (s.eqLowMid !== undefined) dom.eqLowMid.value = s.eqLowMid;
-    if (s.eqMid !== undefined) dom.eqMid.value = s.eqMid;
-    if (s.eqHighMid !== undefined) dom.eqHighMid.value = s.eqHighMid;
-    if (s.eqHigh !== undefined) dom.eqHigh.value = s.eqHigh;
+    // Migrate the original five fixed gains into the new parametric bands.
+    masterEqBands = sanitizeEqBands(s.eqBands, s);
 
     // Preset highlight
     if (s.activePreset) {
@@ -118,7 +132,8 @@ function loadSettingsFromStorage() {
     if (dom.ceilingValue) dom.ceilingValue.textContent = `${parseFloat(dom.truePeakSlider.value).toFixed(1)} dB`;
     if (dom.targetLufsValue && dom.targetLufs) dom.targetLufsValue.textContent = `${dom.targetLufs.value} LUFS`;
     if (dom.inputGainValue && dom.inputGain) dom.inputGainValue.textContent = `${parseFloat(dom.inputGain.value).toFixed(1)} dB`;
-    if (dom.stereoWidthValue && dom.stereoWidth) dom.stereoWidthValue.textContent = `${dom.stereoWidth.value}%`;
+    updateStereoDisplays();
+    renderParametricEqEditor();
     updateAdaptiveDynamicsDisplays();
   } catch (e) { /* ignore parse errors */ }
 }
@@ -135,7 +150,9 @@ function captureState() {
     truePeakCeiling: parseFloat(dom.truePeakSlider.value),
     targetLufs: dom.targetLufs ? parseInt(dom.targetLufs.value) : -14,
     inputGain: dom.inputGain ? parseFloat(dom.inputGain.value) : 0,
-    stereoWidth: dom.stereoWidth ? parseInt(dom.stereoWidth.value) : 100,
+    stereoWidthLow: parseInt(dom.stereoWidthLow.value),
+    stereoWidthMid: parseInt(dom.stereoWidthMid.value),
+    stereoWidthHigh: parseInt(dom.stereoWidthHigh.value),
     cleanLowEnd: dom.cleanLowEnd.checked,
     glueCompression: dom.glueCompression.checked,
     centerBass: dom.centerBass.checked,
@@ -153,11 +170,7 @@ function captureState() {
     repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
     repairPrematureEnding: dom.repairPrematureEnding.checked,
     repairVocalCrackle: dom.repairVocalCrackle.checked,
-    eqLow: parseFloat(dom.eqLow.value),
-    eqLowMid: parseFloat(dom.eqLowMid.value),
-    eqMid: parseFloat(dom.eqMid.value),
-    eqHighMid: parseFloat(dom.eqHighMid.value),
-    eqHigh: parseFloat(dom.eqHigh.value)
+    eqBands: masterEqBands.map(band => ({ ...band }))
   };
 }
 
@@ -173,7 +186,9 @@ function applyState(s) {
   dom.truePeakSlider.value = s.truePeakCeiling;
   if (dom.targetLufs) dom.targetLufs.value = s.targetLufs;
   if (dom.inputGain) dom.inputGain.value = s.inputGain;
-  if (dom.stereoWidth) dom.stereoWidth.value = s.stereoWidth;
+  dom.stereoWidthLow.value = s.stereoWidthLow;
+  dom.stereoWidthMid.value = s.stereoWidthMid;
+  dom.stereoWidthHigh.value = s.stereoWidthHigh;
   dom.cleanLowEnd.checked = s.cleanLowEnd;
   dom.glueCompression.checked = s.glueCompression;
   dom.centerBass.checked = s.centerBass;
@@ -191,17 +206,14 @@ function applyState(s) {
   dom.repairEdgeArtifacts.checked = s.repairEdgeArtifacts;
   dom.repairPrematureEnding.checked = s.repairPrematureEnding;
   dom.repairVocalCrackle.checked = s.repairVocalCrackle;
-  dom.eqLow.value = s.eqLow;
-  dom.eqLowMid.value = s.eqLowMid;
-  dom.eqMid.value = s.eqMid;
-  dom.eqHighMid.value = s.eqHighMid;
-  dom.eqHigh.value = s.eqHigh;
+  masterEqBands = sanitizeEqBands(s.eqBands, s);
 
   // Refresh display values
   if (dom.ceilingValue) dom.ceilingValue.textContent = `${s.truePeakCeiling.toFixed(1)} dB`;
   if (dom.targetLufsValue) dom.targetLufsValue.textContent = `${s.targetLufs} LUFS`;
   if (dom.inputGainValue) dom.inputGainValue.textContent = `${s.inputGain.toFixed(1)} dB`;
-  if (dom.stereoWidthValue) dom.stereoWidthValue.textContent = `${s.stereoWidth}%`;
+  updateStereoDisplays();
+  renderParametricEqEditor();
   updateAdaptiveDynamicsDisplays();
 
   updateEQ();
@@ -234,7 +246,9 @@ const state = {
     restorationReport: null,
     duration: 0,
     lufs: null,
-    normGain: 1.0
+    normGain: 1.0,
+    sourceSpectrum: null,
+    reference: null
   },
   audio: {
     context: null,
@@ -242,6 +256,7 @@ const state = {
     stemSourceNodes: [],
     stemNodeControls: new Map(),
     stemMixBus: null,
+    referenceGain: null,
     masterRestorationDelta: null,
     restorationPreviewRequest: 0,
     analyser: null,
@@ -263,11 +278,13 @@ const state = {
     peakHoldRight: 0,
     peakHoldTimeLeft: 0,
     peakHoldTimeRight: 0,
+    correlation: 1,
     spectrogramAnim: null,
     preserveSpectrogram: false
   },
   ui: {
-    isBypassed: false
+    isBypassed: false,
+    referenceActive: false
   }
 };
 
@@ -325,8 +342,15 @@ const dom = {
   cleanLowEnd: document.getElementById('cleanLowEnd'),
   glueCompression: document.getElementById('glueCompression'),
   centerBass: document.getElementById('centerBass'),
-  stereoWidth: document.getElementById('stereoWidth'),
-  stereoWidthValue: document.getElementById('stereoWidthValue'),
+  stereoWidthLow: document.getElementById('stereoWidthLow'),
+  stereoWidthMid: document.getElementById('stereoWidthMid'),
+  stereoWidthHigh: document.getElementById('stereoWidthHigh'),
+  stereoWidthLowValue: document.getElementById('stereoWidthLowValue'),
+  stereoWidthMidValue: document.getElementById('stereoWidthMidValue'),
+  stereoWidthHighValue: document.getElementById('stereoWidthHighValue'),
+  monoMonitor: document.getElementById('monoMonitor'),
+  correlationFill: document.getElementById('correlationFill'),
+  correlationValue: document.getElementById('correlationValue'),
   cutMud: document.getElementById('cutMud'),
   addAir: document.getElementById('addAir'),
   tameHarsh: document.getElementById('tameHarsh'),
@@ -347,15 +371,20 @@ const dom = {
   repairPrematureEnding: document.getElementById('repairPrematureEnding'),
   repairVocalCrackle: document.getElementById('repairVocalCrackle'),
   restorationStatus: document.getElementById('restorationStatus'),
+  deliveryProfile: document.getElementById('deliveryProfile'),
+  batchNormalizationMode: document.getElementById('batchNormalizationMode'),
   sampleRate: document.getElementById('sampleRate'),
   bitDepth: document.getElementById('bitDepth'),
 
   // EQ
-  eqLow: document.getElementById('eqLow'),
-  eqLowMid: document.getElementById('eqLowMid'),
-  eqMid: document.getElementById('eqMid'),
-  eqHighMid: document.getElementById('eqHighMid'),
-  eqHigh: document.getElementById('eqHigh'),
+  parametricEqBands: document.getElementById('parametricEqBands'),
+
+  // Reference
+  loadReference: document.getElementById('loadReference'),
+  toggleReference: document.getElementById('toggleReference'),
+  referenceLevelMatch: document.getElementById('referenceLevelMatch'),
+  referenceStatus: document.getElementById('referenceStatus'),
+  referenceSpectrumCanvas: document.getElementById('referenceSpectrumCanvas'),
 
   // Process
   processBtn: document.getElementById('processBtn'),
@@ -436,6 +465,43 @@ function readMasterDynamicsSettings() {
   };
 }
 
+function collectMasterSettings({ forExport = false } = {}) {
+  return validateSettings({
+    normalizeLoudness: dom.normalizeLoudness.checked,
+    truePeakLimit: dom.truePeakLimit.checked,
+    truePeakCeiling: parseFloat(dom.truePeakSlider.value),
+    targetLufs: parseInt(dom.targetLufs.value),
+    inputGain: parseFloat(dom.inputGain.value),
+    stereoWidth: parseInt(dom.stereoWidthMid.value),
+    stereoWidthLow: parseInt(dom.stereoWidthLow.value),
+    stereoWidthMid: parseInt(dom.stereoWidthMid.value),
+    stereoWidthHigh: parseInt(dom.stereoWidthHigh.value),
+    monoMonitor: forExport ? false : dom.monoMonitor.checked,
+    cleanLowEnd: dom.cleanLowEnd.checked,
+    glueCompression: dom.glueCompression.checked,
+    centerBass: dom.centerBass.checked,
+    cutMud: dom.cutMud.checked,
+    addAir: dom.addAir.checked,
+    tameHarsh: dom.tameHarsh.checked,
+    dynamicEq: dom.dynamicEq.checked,
+    dynamicEqAmount: parseInt(dom.dynamicEqAmount.value),
+    deEsser: dom.deEsser.checked,
+    deEsserFrequency: parseInt(dom.deEsserFrequency.value),
+    deEsserRange: parseFloat(dom.deEsserRange.value),
+    deEsserAttack: parseFloat(dom.deEsserAttack.value),
+    deEsserRelease: parseFloat(dom.deEsserRelease.value),
+    deEsserAudition: forExport ? false : dom.deEsserAudition.checked,
+    repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
+    repairPrematureEnding: dom.repairPrematureEnding.checked,
+    repairVocalCrackle: dom.repairVocalCrackle.checked,
+    deliveryProfile: dom.deliveryProfile.value,
+    batchNormalizationMode: dom.batchNormalizationMode.value,
+    sampleRate: parseInt(dom.sampleRate.value),
+    bitDepth: parseInt(dom.bitDepth.value),
+    eqBands: masterEqBands
+  });
+}
+
 function updateAdaptiveDynamicsDisplays() {
   if (!dom.dynamicEqAmount) return;
   dom.dynamicEqAmountValue.textContent = `${dom.dynamicEqAmount.value}%`;
@@ -443,6 +509,13 @@ function updateAdaptiveDynamicsDisplays() {
   dom.deEsserRangeValue.textContent = `${parseFloat(dom.deEsserRange.value).toFixed(1)} dB`;
   dom.deEsserAttackValue.textContent = `${parseFloat(dom.deEsserAttack.value).toFixed(0)} ms`;
   dom.deEsserReleaseValue.textContent = `${parseFloat(dom.deEsserRelease.value).toFixed(0)} ms`;
+}
+
+function updateStereoDisplays() {
+  if (!dom.stereoWidthLow) return;
+  dom.stereoWidthLowValue.textContent = `${dom.stereoWidthLow.value}%`;
+  dom.stereoWidthMidValue.textContent = `${dom.stereoWidthMid.value}%`;
+  dom.stereoWidthHighValue.textContent = `${dom.stereoWidthHigh.value}%`;
 }
 
 // ─── Preview Audio Chain ────────────────────────────────────────────────────
@@ -465,7 +538,11 @@ async function createAudioChain() {
   state.audio.splitter.connect(state.audio.analyserLeft, 0);
   state.audio.splitter.connect(state.audio.analyserRight, 1);
 
-  await ensureStudioDynamicsWorklet(ctx);
+  await Promise.all([
+    ensureStudioDynamicsWorklet(ctx),
+    ensureParametricEqWorklet(ctx)
+  ]);
+  const parametricEq = createParametricEqNode(ctx, masterEqBands);
   const studioDynamics = createStudioDynamicsNode(
     ctx,
     createMasterDynamicsConfig(readMasterDynamicsSettings())
@@ -473,6 +550,7 @@ async function createAudioChain() {
   const limiter = await createRealtimeLimiterNode(ctx);
   state.audio.nodes = createMasteringNodes(ctx, limiter, {
     glueCompression: dom.glueCompression.checked,
+    parametricEq,
     studioDynamics
   });
   const nodes = state.audio.nodes;
@@ -489,6 +567,7 @@ function updateAudioChain() {
     nodes.studioDynamics,
     createMasterDynamicsConfig(readMasterDynamicsSettings())
   );
+  configureParametricEqNode(nodes.parametricEq, masterEqBands);
 
   const inputLinear = Math.pow(10, parseFloat(dom.inputGain.value) / 20);
   const normalizationLinear = dom.normalizeLoudness.checked && state.file.normGain !== 1.0
@@ -526,11 +605,12 @@ function updateAudioChain() {
     parseFloat(dom.truePeakSlider.value)
   );
 
-  if (nodes.midGain && nodes.sideGain && dom.stereoWidth) {
-    const width = parseInt(dom.stereoWidth.value);
-    const sideLevel = width / 100;
-    nodes.sideGain.gain.value = sideLevel;
-  }
+  configureStereoImaging(nodes, {
+    stereoWidthLow: parseInt(dom.stereoWidthLow.value),
+    stereoWidthMid: parseInt(dom.stereoWidthMid.value),
+    stereoWidthHigh: parseInt(dom.stereoWidthHigh.value),
+    monoMonitor: dom.monoMonitor.checked
+  });
 
   if (nodes.sideBassHighpass1 && nodes.sideBassHighpass2) {
     const frequency = dom.centerBass.checked ? MONO_BASS_FREQUENCY : 1;
@@ -568,88 +648,49 @@ function connectAudioChain(source) {
 
 // ─── EQ ─────────────────────────────────────────────────────────────────────
 function updateEQ() {
-  const nodes = state.audio.nodes;
-  if (!nodes.eqLow) return;
-
-  nodes.eqLow.gain.value = parseFloat(dom.eqLow.value);
-  nodes.eqLowMid.gain.value = parseFloat(dom.eqLowMid.value);
-  nodes.eqMid.gain.value = parseFloat(dom.eqMid.value);
-  nodes.eqHighMid.gain.value = parseFloat(dom.eqHighMid.value);
-  nodes.eqHigh.gain.value = parseFloat(dom.eqHigh.value);
-
-  document.getElementById('eqLowVal').textContent = `${dom.eqLow.value} dB`;
-  document.getElementById('eqLowMidVal').textContent = `${dom.eqLowMid.value} dB`;
-  document.getElementById('eqMidVal').textContent = `${dom.eqMid.value} dB`;
-  document.getElementById('eqHighMidVal').textContent = `${dom.eqHighMid.value} dB`;
-  document.getElementById('eqHighVal').textContent = `${dom.eqHigh.value} dB`;
-
-  updateEQFill('eqLow', 'eqLowFill');
-  updateEQFill('eqLowMid', 'eqLowMidFill');
-  updateEQFill('eqMid', 'eqMidFill');
-  updateEQFill('eqHighMid', 'eqHighMidFill');
-  updateEQFill('eqHigh', 'eqHighFill');
+  configureParametricEqNode(state.audio.nodes.parametricEq, masterEqBands, state.ui.isBypassed);
 }
 
-function updateEQFill(sliderId, fillId) {
-  const slider = document.getElementById(sliderId);
-  const fill = document.getElementById(fillId);
-  if (!slider || !fill) return;
+function renderParametricEqEditor() {
+  if (!dom.parametricEqBands) return;
+  const typeLabels = { peaking: 'Bell', lowshelf: 'Low Shelf', highshelf: 'High Shelf', highpass: 'High Pass', lowpass: 'Low Pass', notch: 'Notch' };
+  dom.parametricEqBands.innerHTML = masterEqBands.map((band, index) => `
+    <div class="parametric-eq-row" data-eq-band="${index}">
+      <input type="checkbox" data-eq-field="enabled" ${band.enabled ? 'checked' : ''} aria-label="Enable EQ band ${index + 1}">
+      <select data-eq-field="type" aria-label="EQ band ${index + 1} filter type">${Object.entries(typeLabels).map(([value, label]) => `<option value="${value}" ${band.type === value ? 'selected' : ''}>${label}</option>`).join('')}</select>
+      <input type="number" data-eq-field="frequency" min="20" max="20000" step="1" value="${Math.round(band.frequency)}" aria-label="EQ band ${index + 1} frequency">
+      <input type="number" data-eq-field="gain" min="-18" max="18" step="0.1" value="${band.gain}" aria-label="EQ band ${index + 1} gain">
+      <input type="number" data-eq-field="q" min="0.1" max="18" step="0.1" value="${band.q}" aria-label="EQ band ${index + 1} Q">
+      <select data-eq-field="mode" aria-label="EQ band ${index + 1} stereo mode"><option value="stereo" ${band.mode === 'stereo' ? 'selected' : ''}>Stereo</option><option value="mid" ${band.mode === 'mid' ? 'selected' : ''}>Mid</option><option value="side" ${band.mode === 'side' ? 'selected' : ''}>Side</option></select>
+    </div>`).join('');
 
-  const value = parseFloat(slider.value);
-  const min = parseFloat(slider.min);
-  const max = parseFloat(slider.max);
-  const range = max - min;
-  const center = 50;
-
-  const percent = ((value - min) / range) * 100;
-
-  if (value >= 0) {
-    fill.style.bottom = `${center}%`;
-    fill.style.top = 'auto';
-    fill.style.height = `${percent - center}%`;
-  } else {
-    fill.style.top = `${100 - center}%`;
-    fill.style.bottom = 'auto';
-    fill.style.height = `${center - percent}%`;
-  }
+  dom.parametricEqBands.querySelectorAll('[data-eq-field]').forEach(control => {
+    control.addEventListener('focus', pushUndo, { once: true });
+    control.addEventListener('change', () => {
+      const row = control.closest('[data-eq-band]');
+      const index = parseInt(row.dataset.eqBand);
+      const field = control.dataset.eqField;
+      const value = control.type === 'checkbox' ? control.checked
+        : control.type === 'number' ? parseFloat(control.value) : control.value;
+      masterEqBands[index] = { ...masterEqBands[index], [field]: value };
+      masterEqBands = sanitizeEqBands(masterEqBands);
+      updateEQ();
+      document.querySelectorAll('.preset-btn').forEach(button => button.classList.remove('active'));
+      saveSettingsToStorage();
+    });
+  });
 }
-
-const eqPresets = {
-  flat: { low: 0, lowMid: 0, mid: 0, highMid: 0, high: 0 },
-  vocal: { low: -2, lowMid: -1, mid: 2, highMid: 3, high: 1 },
-  bass: { low: 6, lowMid: 3, mid: 0, highMid: -1, high: -2 },
-  bright: { low: -1, lowMid: 0, mid: 1, highMid: 3, high: 5 },
-  warm: { low: 3, lowMid: 2, mid: 0, highMid: -2, high: -3 },
-  suno: { low: 1, lowMid: -2, mid: 1, highMid: -1, high: 2 }
-};
 
 document.querySelectorAll('.preset-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    const preset = eqPresets[btn.dataset.preset];
-    if (preset) {
-      pushUndo();
-      dom.eqLow.value = preset.low;
-      dom.eqLowMid.value = preset.lowMid;
-      dom.eqMid.value = preset.mid;
-      dom.eqHighMid.value = preset.highMid;
-      dom.eqHigh.value = preset.high;
-      updateEQ();
-
-      document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      saveSettingsToStorage();
-    }
-  });
-});
-
-[dom.eqLow, dom.eqLowMid, dom.eqMid, dom.eqHighMid, dom.eqHigh].forEach(slider => {
-  slider.addEventListener('input', () => {
+    pushUndo();
+    masterEqBands = applyEqPreset(masterEqBands, btn.dataset.preset);
+    renderParametricEqEditor();
     updateEQ();
     document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
     saveSettingsToStorage();
   });
-  // Push undo on mousedown (start of drag)
-  slider.addEventListener('mousedown', () => pushUndo());
 });
 
 // ─── File Loading ───────────────────────────────────────────────────────────
@@ -694,6 +735,7 @@ function createDefaultStemSettings() {
     repairEdgeArtifacts: false,
     repairPrematureEnding: false,
     repairVocalCrackle: false,
+    eqBands: cloneDefaultEqBands(),
     eqLow: 0,
     eqLowMid: 0,
     eqMid: 0,
@@ -756,21 +798,8 @@ function connectStemProcessingChain(context, source, stem, audible, destination,
   highpass.frequency.value = settings.cleanLowEnd ? AUDIO_CONSTANTS.HIGHPASS_FREQ : 1;
   highpass.Q.value = 0.7;
 
-  const eqSettings = [
-    ['lowshelf', AUDIO_CONSTANTS.FREQ_LOW, settings.eqLow, 1],
-    ['peaking', AUDIO_CONSTANTS.FREQ_LOW_MID, settings.eqLowMid, 1],
-    ['peaking', AUDIO_CONSTANTS.FREQ_MID, settings.eqMid, 1],
-    ['peaking', AUDIO_CONSTANTS.FREQ_HIGH_MID, settings.eqHighMid, 1],
-    ['highshelf', AUDIO_CONSTANTS.FREQ_HIGH, settings.eqHigh, 1]
-  ];
-  const eqNodes = eqSettings.map(([type, frequency, value, q]) => {
-    const node = context.createBiquadFilter();
-    node.type = type;
-    node.frequency.value = frequency;
-    node.gain.value = value;
-    node.Q.value = q;
-    return node;
-  });
+  settings.eqBands = sanitizeEqBands(settings.eqBands, settings);
+  const parametricEq = createParametricEqNode(context, settings.eqBands);
 
   const mud = context.createBiquadFilter();
   mud.type = 'peaking';
@@ -806,8 +835,7 @@ function connectStemProcessingChain(context, source, stem, audible, destination,
     }
   );
 
-  let current = source.connect(gain).connect(highpass);
-  for (const eq of eqNodes) current = current.connect(eq);
+  let current = source.connect(gain).connect(highpass).connect(parametricEq);
   current = current.connect(mud).connect(harsh).connect(harshHigh).connect(air).connect(studioDynamics);
 
   const splitter = context.createChannelSplitter(2);
@@ -843,7 +871,7 @@ function connectStemProcessingChain(context, source, stem, audible, destination,
   panner.pan.value = settings.pan / 100;
   merger.connect(panner).connect(destination);
 
-  return { gain, highpass, eqNodes, mud, harsh, harshHigh, air, studioDynamics, side, panner };
+  return { gain, highpass, parametricEq, mud, harsh, harshHigh, air, studioDynamics, side, panner };
 }
 
 function stemIsAudible(song, stem) {
@@ -866,9 +894,7 @@ function updateLiveStemSettings(song) {
     nodes.panner.pan.setTargetAtTime(settings.pan / 100, now, 0.012);
     nodes.side.gain.setTargetAtTime(settings.width / 100, now, 0.012);
     nodes.highpass.frequency.setTargetAtTime(settings.cleanLowEnd ? AUDIO_CONSTANTS.HIGHPASS_FREQ : 1, now, 0.012);
-    nodes.eqNodes.forEach((node, index) => {
-      node.gain.setTargetAtTime([settings.eqLow, settings.eqLowMid, settings.eqMid, settings.eqHighMid, settings.eqHigh][index], now, 0.012);
-    });
+    configureParametricEqNode(nodes.parametricEq, settings.eqBands);
     nodes.mud.gain.setTargetAtTime(settings.cutMud ? -3 : 0, now, 0.012);
     nodes.harsh.gain.setTargetAtTime(settings.tameHarsh ? AUDIO_CONSTANTS.HARSHNESS_GAIN_4K : 0, now, 0.012);
     nodes.harshHigh.gain.setTargetAtTime(settings.tameHarsh ? AUDIO_CONSTANTS.HARSHNESS_GAIN_6K : 0, now, 0.012);
@@ -882,7 +908,10 @@ async function renderStemSongMix(song, sampleRate = null, allowAudition = true) 
   const rate = sampleRate || Math.max(...song.stems.map(stem => stem.buffer.sampleRate));
   const duration = Math.max(...song.stems.map(stem => stem.buffer.duration));
   const context = new OfflineAudioContext(2, Math.ceil(duration * rate), rate);
-  await ensureStudioDynamicsWorklet(context);
+  await Promise.all([
+    ensureStudioDynamicsWorklet(context),
+    ensureParametricEqWorklet(context)
+  ]);
   for (const stem of song.stems) {
     const source = context.createBufferSource();
     const needsRestoration = stem.settings.repairEdgeArtifacts ||
@@ -914,6 +943,7 @@ async function activateAudioBuffer(buffer, metaPrefix = '') {
 
   const lufsResult = measureLUFS(buffer, { truePeak: false });
   state.file.lufs = lufsResult.integratedLUFS;
+  state.file.sourceSpectrum = calculateAverageSpectrum(buffer);
   const targetLufs = dom.targetLufs ? parseInt(dom.targetLufs.value) : AUDIO_CONSTANTS.TARGET_LUFS;
   state.file.normGain = calculateNormalizationGain(state.file.lufs, targetLufs);
 
@@ -947,6 +977,79 @@ async function loadStemSong(song) {
   renderBatchList();
   drawWaveform();
 }
+
+function referencePlaybackGain() {
+  const reference = state.file.reference;
+  if (!reference || !dom.referenceLevelMatch.checked || !Number.isFinite(reference.lufs)) return 1;
+  const target = dom.normalizeLoudness.checked
+    ? parseInt(dom.targetLufs.value)
+    : Number.isFinite(state.file.lufs) ? state.file.lufs : reference.lufs;
+  return calculateNormalizationGain(reference.lufs, target);
+}
+
+async function loadReferenceTrack() {
+  const filePath = await window.electronAPI.selectFile();
+  if (!filePath) return;
+  if (!AUDIO_FILE_PATTERN.test(filePath)) {
+    showFileStatus('✗ Reference must be an audio file, not a stem archive.', 'error');
+    return;
+  }
+  try {
+    dom.referenceStatus.textContent = 'Loading reference…';
+    const buffer = await decodeAudioPath(filePath);
+    const analysis = measureLUFS(buffer, { truePeak: false });
+    const wasPlaying = state.playback.isPlaying;
+    const playbackPosition = wasPlaying
+      ? state.audio.context.currentTime - state.playback.startTime
+      : state.playback.pauseTime;
+    if (wasPlaying) stopAudio({ preserveSpectrogram: true });
+    state.file.reference = {
+      path: filePath,
+      name: filePath.split(/[\\/]/).pop(),
+      buffer,
+      lufs: analysis.integratedLUFS,
+      spectrum: calculateAverageSpectrum(buffer)
+    };
+    state.ui.referenceActive = false;
+    dom.toggleReference.disabled = false;
+    dom.toggleReference.textContent = 'A: Source';
+    dom.referenceStatus.textContent = `${state.file.reference.name} • ${Number.isFinite(analysis.integratedLUFS) ? analysis.integratedLUFS.toFixed(1) : 'N/A'} LUFS`;
+    drawReferenceSpectrumComparison();
+    if (wasPlaying) {
+      state.playback.pauseTime = Math.min(playbackPosition, Math.max(0, state.file.duration - 0.01));
+      startPlaybackAt(state.playback.pauseTime);
+    }
+  } catch (error) {
+    console.error('Reference load error:', error);
+    dom.referenceStatus.textContent = 'Reference could not be loaded';
+    showFileStatus(`✗ Reference error: ${error.message}`, 'error');
+  }
+}
+
+function toggleReferencePlayback() {
+  if (!state.file.reference) return;
+  const wasPlaying = state.playback.isPlaying;
+  const position = wasPlaying
+    ? state.audio.context.currentTime - state.playback.startTime
+    : state.playback.pauseTime;
+  state.ui.referenceActive = !state.ui.referenceActive;
+  dom.toggleReference.textContent = state.ui.referenceActive ? 'B: Reference' : 'A: Source';
+  dom.toggleReference.classList.toggle('active', state.ui.referenceActive);
+  if (wasPlaying) {
+    stopAudio({ preserveSpectrogram: true });
+    const duration = state.ui.referenceActive ? state.file.reference.buffer.duration : state.file.duration;
+    state.playback.pauseTime = Math.min(position, Math.max(0, duration - 0.01));
+    startPlaybackAt(state.playback.pauseTime);
+  }
+}
+
+dom.loadReference.addEventListener('click', loadReferenceTrack);
+dom.toggleReference.addEventListener('click', toggleReferencePlayback);
+dom.referenceLevelMatch.addEventListener('change', () => {
+  if (state.ui.referenceActive && state.audio.referenceGain) {
+    state.audio.referenceGain.gain.setTargetAtTime(referencePlaybackGain(), state.audio.context.currentTime, 0.02);
+  }
+});
 
 function scheduleStemSongMix(song) {
   // Gain and pan must remain click-free while the user auditions the song.
@@ -1222,6 +1325,20 @@ function finishPlayback() {
   stopLevelMeters();
 }
 
+function startReferencePlayback(offset) {
+  const reference = state.file.reference;
+  if (!reference || offset >= reference.buffer.duration) return false;
+  state.audio.sourceNode = state.audio.context.createBufferSource();
+  state.audio.sourceNode.buffer = reference.buffer;
+  state.audio.referenceGain = state.audio.context.createGain();
+  state.audio.referenceGain.gain.value = referencePlaybackGain();
+  state.audio.sourceNode.connect(state.audio.referenceGain);
+  connectPreviewOutput(state.audio.referenceGain);
+  state.audio.sourceNode.onended = finishPlayback;
+  state.audio.sourceNode.start(0, offset);
+  return true;
+}
+
 function startSingleSourcePlayback(offset) {
   state.audio.sourceNode = state.audio.context.createBufferSource();
   state.audio.sourceNode.buffer = state.ui.isBypassed
@@ -1293,8 +1410,10 @@ function startPlaybackAt(offset) {
   if (!state.file.buffer || !state.audio.context) return;
   if (state.audio.context.state === 'suspended') state.audio.context.resume();
 
-  const liveStems = state.file.stemSong;
-  const started = liveStems ? startLiveStemPlayback(offset) : startSingleSourcePlayback(offset);
+  const liveStems = !state.ui.referenceActive && state.file.stemSong;
+  const started = state.ui.referenceActive
+    ? startReferencePlayback(offset)
+    : liveStems ? startLiveStemPlayback(offset) : startSingleSourcePlayback(offset);
   if (!started) return;
 
   state.playback.startTime = state.audio.context.currentTime - offset;
@@ -1331,6 +1450,10 @@ function stopAudio({ preserveSpectrogram = false } = {}) {
     } catch (e) { /* already stopped */ }
     state.audio.sourceNode = null;
   }
+  if (state.audio.referenceGain) {
+    try { state.audio.referenceGain.disconnect(); } catch (e) { /* already disconnected */ }
+    state.audio.referenceGain = null;
+  }
   state.audio.stemSourceNodes.forEach(source => {
     try {
       source.onended = null;
@@ -1357,7 +1480,10 @@ function startSeekUpdate() {
   state.playback.seekInterval = setInterval(() => {
     if (state.playback.isPlaying && state.file.buffer && !state.playback.isSeeking) {
       const currentTime = state.audio.context.currentTime - state.playback.startTime;
-      if (currentTime >= state.file.duration) {
+      const activeDuration = state.ui.referenceActive && state.file.reference
+        ? state.file.reference.buffer.duration
+        : state.file.duration;
+      if (currentTime >= activeDuration) {
         stopAudio();
         state.playback.pauseTime = 0;
         setPlaybackPosition(0);
@@ -1369,7 +1495,10 @@ function startSeekUpdate() {
 }
 
 function seekTo(time, { resume = state.playback.isPlaying } = {}) {
-  time = Math.max(0, Math.min(time, state.file.duration));
+  const activeDuration = state.ui.referenceActive && state.file.reference
+    ? Math.min(state.file.duration, state.file.reference.buffer.duration)
+    : state.file.duration;
+  time = Math.max(0, Math.min(time, activeDuration));
 
   // Set seeking flag to prevent race conditions
   state.playback.isSeeking = true;
@@ -1412,13 +1541,30 @@ function startLevelMeters({ preserveSpectrogram = false } = {}) {
 
     let peakL = 0;
     let peakR = 0;
+    let sumLeftRight = 0;
+    let sumLeftSquared = 0;
+    let sumRightSquared = 0;
 
     for (let i = 0; i < bufferLength; i++) {
       const normalizedL = (dataArrayLeft[i] - 128) / 128;
       const normalizedR = (dataArrayRight[i] - 128) / 128;
       peakL = Math.max(peakL, Math.abs(normalizedL));
       peakR = Math.max(peakR, Math.abs(normalizedR));
+      sumLeftRight += normalizedL * normalizedR;
+      sumLeftSquared += normalizedL * normalizedL;
+      sumRightSquared += normalizedR * normalizedR;
     }
+
+    const denominator = Math.sqrt(sumLeftSquared * sumRightSquared);
+    const measuredCorrelation = denominator > 1e-9 ? sumLeftRight / denominator : 1;
+    state.meters.correlation = state.meters.correlation * 0.8 + measuredCorrelation * 0.2;
+    const correlation = Math.max(-1, Math.min(1, state.meters.correlation));
+    dom.correlationFill.style.width = `${Math.abs(correlation) * 50}%`;
+    dom.correlationFill.classList.toggle('negative', correlation < 0);
+    dom.correlationValue.textContent = `${correlation >= 0 ? '+' : ''}${correlation.toFixed(2)}`;
+    const correlationMeter = dom.correlationFill.closest('[role="meter"]');
+    correlationMeter?.setAttribute('aria-valuenow', correlation.toFixed(2));
+    drawReferenceSpectrumComparison();
 
     const dbL = peakL > 0 ? 20 * Math.log10(peakL) : -Infinity;
     const dbR = peakR > 0 ? 20 * Math.log10(peakR) : -Infinity;
@@ -1499,6 +1645,12 @@ function stopLevelMeters({ clearSpectrogram = true } = {}) {
   state.meters.peakHoldRight = 0;
   state.meters.peakHoldTimeLeft = 0;
   state.meters.peakHoldTimeRight = 0;
+  state.meters.correlation = 1;
+  if (dom.correlationFill) {
+    dom.correlationFill.style.width = '50%';
+    dom.correlationFill.classList.remove('negative');
+    dom.correlationValue.textContent = '+1.00';
+  }
 
   // A pause should leave the current visualization visible so playback can
   // continue from the same image when resumed. A true stop clears it.
@@ -1511,6 +1663,71 @@ function stopLevelMeters({ clearSpectrogram = true } = {}) {
 }
 
 // ─── Spectrogram (complete implementation) ──────────────────────────────────
+function spectrumValueAt(spectrum, frequency) {
+  if (!spectrum?.decibels?.length) return -120;
+  const bin = Math.max(0, Math.min(
+    spectrum.decibels.length - 1,
+    Math.round(frequency * spectrum.fftSize / spectrum.sampleRate)
+  ));
+  return spectrum.decibels[bin];
+}
+
+function drawReferenceSpectrumComparison() {
+  const canvas = dom.referenceSpectrumCanvas;
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  if (!(rect.width > 0) || !(rect.height > 0)) return;
+  const ratio = window.devicePixelRatio || 1;
+  if (canvas.width !== Math.round(rect.width * ratio) || canvas.height !== Math.round(rect.height * ratio)) {
+    canvas.width = Math.round(rect.width * ratio);
+    canvas.height = Math.round(rect.height * ratio);
+  }
+  const context = canvas.getContext('2d');
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  context.clearRect(0, 0, rect.width, rect.height);
+  const styles = getComputedStyle(document.documentElement);
+  context.fillStyle = styles.getPropertyValue('--spectrogram-bg') || '#111827';
+  context.fillRect(0, 0, rect.width, rect.height);
+
+  const live = new Float32Array(state.audio.analyser?.frequencyBinCount || 0);
+  let sourceSpectrum = state.file.sourceSpectrum;
+  if (state.playback.isPlaying && !state.ui.referenceActive && live.length) {
+    state.audio.analyser.getFloatFrequencyData(live);
+    sourceSpectrum = { sampleRate: state.audio.context.sampleRate, fftSize: state.audio.analyser.fftSize, decibels: live };
+  }
+  const referenceSpectrum = state.file.reference?.spectrum;
+  const curves = [
+    { spectrum: sourceSpectrum, color: '#a855f7' },
+    { spectrum: referenceSpectrum, color: '#22d3ee' }
+  ];
+  const minimumFrequency = 20;
+  const maximumFrequency = Math.min(20000, (sourceSpectrum?.sampleRate || 48000) * 0.45);
+  const frequencies = Array.from({ length: Math.max(2, Math.floor(rect.width)) }, (_, x) =>
+    minimumFrequency * Math.pow(maximumFrequency / minimumFrequency, x / Math.max(1, rect.width - 1))
+  );
+
+  context.strokeStyle = 'rgba(148, 163, 184, 0.16)';
+  context.lineWidth = 1;
+  for (const frequency of [100, 1000, 10000]) {
+    const x = Math.log(frequency / minimumFrequency) / Math.log(maximumFrequency / minimumFrequency) * rect.width;
+    context.beginPath(); context.moveTo(x, 0); context.lineTo(x, rect.height); context.stroke();
+  }
+  for (const curve of curves) {
+    if (!curve.spectrum) continue;
+    const values = frequencies.map(frequency => spectrumValueAt(curve.spectrum, frequency));
+    const peak = Math.max(...values.filter(Number.isFinite));
+    context.strokeStyle = curve.color;
+    context.lineWidth = 1.5;
+    context.beginPath();
+    values.forEach((value, x) => {
+      const relative = Math.max(-60, Math.min(0, value - peak));
+      const y = (1 - (relative + 60) / 60) * (rect.height - 4) + 2;
+      if (x === 0) context.moveTo(x, y); else context.lineTo(x, y);
+    });
+    context.stroke();
+  }
+}
+
 function startSpectrogram({ preserve = false } = {}) {
   if (!state.audio.analyser || !dom.spectrogramCanvas) return;
 
@@ -1778,8 +1995,8 @@ function toggleOriginalPreview() {
 dom.bypassBtn.addEventListener('click', toggleOriginalPreview);
 
 // ─── Offline Export: pre-master render, then loudness/true-peak final stage ──
-async function processAudioOffline(settings, inputBuffer = state.file.buffer) {
-  const targetSampleRate = settings.sampleRate;
+async function renderMasterPreFinal(settings, inputBuffer = state.file.buffer) {
+  const targetSampleRate = resolveOutputSampleRate(settings.sampleRate, inputBuffer.sampleRate);
   const numChannels = inputBuffer.numberOfChannels;
   const outputLength = Math.ceil(inputBuffer.length * targetSampleRate / inputBuffer.sampleRate);
   const compressorLatencyFrames = settings.glueCompression
@@ -1797,7 +2014,11 @@ async function processAudioOffline(settings, inputBuffer = state.file.buffer) {
   const restoredInput = createRestoredInputBuffer(offlineCtx, inputBuffer, settings);
   source.buffer = restoredInput.buffer;
 
-  await ensureStudioDynamicsWorklet(offlineCtx);
+  await Promise.all([
+    ensureStudioDynamicsWorklet(offlineCtx),
+    ensureParametricEqWorklet(offlineCtx)
+  ]);
+  const parametricEq = createParametricEqNode(offlineCtx, settings.eqBands);
   const studioDynamics = createStudioDynamicsNode(
     offlineCtx,
     createMasterDynamicsConfig(settings)
@@ -1808,17 +2029,13 @@ async function processAudioOffline(settings, inputBuffer = state.file.buffer) {
   // final limiting for the measured second stage below.
   const nodes = createMasteringNodes(offlineCtx, offlineCtx.createGain(), {
     glueCompression: settings.glueCompression,
+    parametricEq,
     studioDynamics
   });
   configureMasteringNodes(nodes, { ...settings, truePeakLimit: false });
   nodes.inputGain.gain.value = Math.pow(10, (settings.inputGain || 0) / 20);
-  nodes.eqLow.gain.value = settings.eqLow;
-  nodes.eqLowMid.gain.value = settings.eqLowMid;
-  nodes.eqMid.gain.value = settings.eqMid;
-  nodes.eqHighMid.gain.value = settings.eqHighMid;
-  nodes.eqHigh.gain.value = settings.eqHigh;
   nodes.midGain.gain.value = 1;
-  nodes.sideGain.gain.value = (settings.stereoWidth ?? 100) / 100;
+  configureStereoImaging(nodes, { ...settings, monoMonitor: false });
   nodes.normGain.gain.value = 1;
   connectMasteringGraph(source, nodes).connect(offlineCtx.destination);
   source.start(0);
@@ -1845,7 +2062,18 @@ async function processAudioOffline(settings, inputBuffer = state.file.buffer) {
     );
   }
 
-  const masteringReport = finalizeMaster(renderedBuffer, settings);
+  return renderedBuffer;
+}
+
+async function processAudioOffline(settings, inputBuffer = state.file.buffer, options = {}) {
+  const renderedBuffer = await renderMasterPreFinal(settings, inputBuffer);
+  const reportSettings = options.normalizationMode
+    ? { ...settings, normalizationMode: options.normalizationMode }
+    : settings;
+  const masteringReport = finalizeMaster(renderedBuffer, reportSettings, {
+    normalizationGain: options.normalizationGain
+  });
+  if (options.albumReport) masteringReport.album = options.albumReport;
   masteringReports.set(renderedBuffer, masteringReport);
 
   return renderedBuffer;
@@ -1880,39 +2108,7 @@ dom.processBtn.addEventListener('click', async () => {
   dom.statusMessage.textContent = '';
   dom.statusMessage.className = 'status-message';
 
-  const settings = validateSettings({
-    normalizeLoudness: dom.normalizeLoudness.checked,
-    truePeakLimit: dom.truePeakLimit.checked,
-    truePeakCeiling: parseFloat(dom.truePeakSlider.value),
-    targetLufs: dom.targetLufs ? parseInt(dom.targetLufs.value) : -14,
-    inputGain: dom.inputGain ? parseFloat(dom.inputGain.value) : 0,
-    stereoWidth: dom.stereoWidth ? parseInt(dom.stereoWidth.value) : 100,
-    cleanLowEnd: dom.cleanLowEnd.checked,
-    glueCompression: dom.glueCompression.checked,
-    centerBass: dom.centerBass.checked,
-    cutMud: dom.cutMud.checked,
-    addAir: dom.addAir.checked,
-    tameHarsh: dom.tameHarsh.checked,
-    dynamicEq: dom.dynamicEq.checked,
-    dynamicEqAmount: parseInt(dom.dynamicEqAmount.value),
-    deEsser: dom.deEsser.checked,
-    deEsserFrequency: parseInt(dom.deEsserFrequency.value),
-    deEsserRange: parseFloat(dom.deEsserRange.value),
-    deEsserAttack: parseFloat(dom.deEsserAttack.value),
-    deEsserRelease: parseFloat(dom.deEsserRelease.value),
-    // Audition is a monitor path and is never written into an export.
-    deEsserAudition: false,
-    repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
-    repairPrematureEnding: dom.repairPrematureEnding.checked,
-    repairVocalCrackle: dom.repairVocalCrackle.checked,
-    sampleRate: parseInt(dom.sampleRate.value),
-    bitDepth: parseInt(dom.bitDepth.value),
-    eqLow: parseFloat(dom.eqLow.value),
-    eqLowMid: parseFloat(dom.eqLowMid.value),
-    eqMid: parseFloat(dom.eqMid.value),
-    eqHighMid: parseFloat(dom.eqHighMid.value),
-    eqHigh: parseFloat(dom.eqHigh.value)
-  });
+  const settings = collectMasterSettings({ forExport: true });
 
   try {
     updateProgress(10);
@@ -1984,11 +2180,12 @@ const restorationControls = [
 ];
 
 [dom.normalizeLoudness, dom.truePeakLimit, dom.cleanLowEnd, dom.glueCompression,
- dom.centerBass, dom.cutMud, dom.addAir, dom.tameHarsh, dom.dynamicEq, dom.deEsser,
+ dom.centerBass, dom.monoMonitor, dom.cutMud, dom.addAir, dom.tameHarsh, dom.dynamicEq, dom.deEsser,
  dom.deEsserAudition, dom.repairEdgeArtifacts, dom.repairPrematureEnding,
  dom.repairVocalCrackle].forEach(el => {
   el.addEventListener('change', async () => {
     pushUndo();
+    if (el === dom.normalizeLoudness || el === dom.truePeakLimit) markDeliveryProfileCustom();
     if (restorationControls.includes(el)) {
       if (state.file.stemSong && state.playback.isPlaying) {
         void updateLiveMasterRestorationPreview();
@@ -2014,6 +2211,7 @@ const restorationControls = [
 
 dom.truePeakSlider.addEventListener('mousedown', () => pushUndo());
 dom.truePeakSlider.addEventListener('input', () => {
+  markDeliveryProfileCustom();
   const ceiling = parseFloat(dom.truePeakSlider.value);
   dom.ceilingValue.textContent = `${ceiling.toFixed(1)} dB`;
 
@@ -2053,19 +2251,19 @@ if (dom.inputGain) {
   });
 }
 
-if (dom.stereoWidth) {
-  dom.stereoWidth.addEventListener('mousedown', () => pushUndo());
-  dom.stereoWidth.addEventListener('input', () => {
-    const width = parseInt(dom.stereoWidth.value);
-    dom.stereoWidthValue.textContent = `${width}%`;
+[dom.stereoWidthLow, dom.stereoWidthMid, dom.stereoWidthHigh].forEach(slider => {
+  slider.addEventListener('mousedown', () => pushUndo());
+  slider.addEventListener('input', () => {
+    updateStereoDisplays();
     updateAudioChain();
     saveSettingsToStorage();
   });
-}
+});
 
 if (dom.targetLufs) {
   dom.targetLufs.addEventListener('mousedown', () => pushUndo());
   dom.targetLufs.addEventListener('input', () => {
+    markDeliveryProfileCustom();
     const targetLufs = parseInt(dom.targetLufs.value);
     dom.targetLufsValue.textContent = `${targetLufs} LUFS`;
 
@@ -2081,9 +2279,36 @@ if (dom.targetLufs) {
   });
 }
 
-// Save on sample rate / bit depth change
-dom.sampleRate.addEventListener('change', saveSettingsToStorage);
-dom.bitDepth.addEventListener('change', saveSettingsToStorage);
+function markDeliveryProfileCustom() {
+  if (dom.deliveryProfile.value !== 'custom') dom.deliveryProfile.value = 'custom';
+}
+
+dom.deliveryProfile.addEventListener('change', () => {
+  const profile = applyDeliveryProfile({}, dom.deliveryProfile.value);
+  if (profile.normalizeLoudness !== undefined) dom.normalizeLoudness.checked = profile.normalizeLoudness;
+  if (profile.targetLufs !== undefined) dom.targetLufs.value = profile.targetLufs;
+  if (profile.truePeakLimit !== undefined) dom.truePeakLimit.checked = profile.truePeakLimit;
+  if (profile.truePeakCeiling !== undefined) dom.truePeakSlider.value = profile.truePeakCeiling;
+  if (profile.sampleRate !== undefined) dom.sampleRate.value = profile.sampleRate;
+  if (profile.bitDepth !== undefined) dom.bitDepth.value = profile.bitDepth;
+  dom.targetLufsValue.textContent = `${dom.targetLufs.value} LUFS`;
+  dom.ceilingValue.textContent = `${parseFloat(dom.truePeakSlider.value).toFixed(1)} dB`;
+  if (state.file.lufs !== null && Number.isFinite(state.file.lufs)) {
+    state.file.normGain = calculateNormalizationGain(state.file.lufs, parseInt(dom.targetLufs.value));
+  }
+  updateAudioChain();
+  updateChecklist();
+  refreshFaderFills();
+  saveSettingsToStorage();
+});
+
+[dom.sampleRate, dom.bitDepth].forEach(select => {
+  select.addEventListener('change', () => {
+    markDeliveryProfileCustom();
+    saveSettingsToStorage();
+  });
+});
+dom.batchNormalizationMode.addEventListener('change', saveSettingsToStorage);
 
 // ─── Fader Fill Helper ──────────────────────────────────────────────────────
 function refreshFaderFills() {
@@ -2460,6 +2685,7 @@ function renderStemEditor() {
 
   const stem = song.stems[song.selectedStemIndex];
   const settings = stem.settings;
+  settings.eqBands = sanitizeEqBands(settings.eqBands, settings);
   const toggle = (key, label, tip) => `
     <label class="stem-editor-toggle" title="${tip}">
       <input type="checkbox" data-stem-editor-setting="${key}" ${settings[key] ? 'checked' : ''}>
@@ -2493,12 +2719,15 @@ function renderStemEditor() {
       ${toggle('tameHarsh', 'Tame Harshness', 'Reduce harsh 4–6kHz energy on this stem.')}
     </div>
     <div class="stem-editor-section-title">Stem EQ</div>
-    <div class="stem-editor-eq">
-      ${slider('eqLow', '80Hz', -12, 12, 1)}
-      ${slider('eqLowMid', '250Hz', -12, 12, 1)}
-      ${slider('eqMid', '1kHz', -12, 12, 1)}
-      ${slider('eqHighMid', '4kHz', -12, 12, 1)}
-      ${slider('eqHigh', '12kHz', -12, 12, 1)}
+    <div class="stem-parametric-eq">
+      ${settings.eqBands.map((band, index) => `<div class="stem-parametric-row" data-stem-eq-band="${index}">
+        <input type="checkbox" data-stem-eq-field="enabled" ${band.enabled ? 'checked' : ''} aria-label="Enable stem EQ band ${index + 1}">
+        <select data-stem-eq-field="type"><option value="peaking" ${band.type === 'peaking' ? 'selected' : ''}>Bell</option><option value="lowshelf" ${band.type === 'lowshelf' ? 'selected' : ''}>Low Shelf</option><option value="highshelf" ${band.type === 'highshelf' ? 'selected' : ''}>High Shelf</option><option value="highpass" ${band.type === 'highpass' ? 'selected' : ''}>High Pass</option><option value="lowpass" ${band.type === 'lowpass' ? 'selected' : ''}>Low Pass</option><option value="notch" ${band.type === 'notch' ? 'selected' : ''}>Notch</option></select>
+        <input type="number" data-stem-eq-field="frequency" min="20" max="20000" value="${Math.round(band.frequency)}" aria-label="Stem EQ band ${index + 1} frequency">
+        <input type="number" data-stem-eq-field="gain" min="-18" max="18" step="0.1" value="${band.gain}" aria-label="Stem EQ band ${index + 1} gain">
+        <input type="number" data-stem-eq-field="q" min="0.1" max="18" step="0.1" value="${band.q}" aria-label="Stem EQ band ${index + 1} Q">
+        <select data-stem-eq-field="mode"><option value="stereo" ${band.mode === 'stereo' ? 'selected' : ''}>Stereo</option><option value="mid" ${band.mode === 'mid' ? 'selected' : ''}>Mid</option><option value="side" ${band.mode === 'side' ? 'selected' : ''}>Side</option></select>
+      </div>`).join('')}
     </div>
     <div class="stem-editor-section-title">Adaptive Control</div>
     <div class="stem-editor-toggles">
@@ -2557,6 +2786,19 @@ function renderStemEditor() {
                 : key === 'deEsserFrequency' ? ' Hz' : ' dB';
         output.textContent = `${input.value}${suffix}`;
       }
+      updateLiveStemSettings(song);
+      scheduleStemSongMix(song);
+    });
+  });
+
+  batchDom.stemEditor.querySelectorAll('[data-stem-eq-field]').forEach(control => {
+    control.addEventListener('change', () => {
+      const index = parseInt(control.closest('[data-stem-eq-band]').dataset.stemEqBand);
+      const field = control.dataset.stemEqField;
+      const value = control.type === 'checkbox' ? control.checked
+        : control.type === 'number' ? parseFloat(control.value) : control.value;
+      stem.settings.eqBands[index] = { ...stem.settings.eqBands[index], [field]: value };
+      stem.settings.eqBands = sanitizeEqBands(stem.settings.eqBands);
       updateLiveStemSettings(song);
       scheduleStemSongMix(song);
     });
@@ -2819,6 +3061,18 @@ async function writeFileChunked(outputPath, wavBuffer) {
   await yieldToUI();
 }
 
+async function loadBatchItemAudio(item, settings) {
+  if (item.type === 'stem-song') {
+    return renderStemSongMix(item, settings.sampleRate || null, false);
+  }
+  const context = new AudioContext();
+  try {
+    return await decodeAudioPath(item.path, context);
+  } finally {
+    await context.close();
+  }
+}
+
 batchDom.exportBtn.addEventListener('click', async () => {
   if (batchState.queue.length === 0 || batchState.isProcessing) return;
 
@@ -2829,46 +3083,47 @@ batchDom.exportBtn.addEventListener('click', async () => {
   updateBatchButtons();
   batchDom.progress.classList.remove('hidden');
 
-  const settings = validateSettings({
-    normalizeLoudness: dom.normalizeLoudness.checked,
-    truePeakLimit: dom.truePeakLimit.checked,
-    truePeakCeiling: parseFloat(dom.truePeakSlider.value),
-    targetLufs: dom.targetLufs ? parseInt(dom.targetLufs.value) : -14,
-    inputGain: dom.inputGain ? parseFloat(dom.inputGain.value) : 0,
-    stereoWidth: dom.stereoWidth ? parseInt(dom.stereoWidth.value) : 100,
-    cleanLowEnd: dom.cleanLowEnd.checked,
-    glueCompression: dom.glueCompression.checked,
-    centerBass: dom.centerBass.checked,
-    cutMud: dom.cutMud.checked,
-    addAir: dom.addAir.checked,
-    tameHarsh: dom.tameHarsh.checked,
-    dynamicEq: dom.dynamicEq.checked,
-    dynamicEqAmount: parseInt(dom.dynamicEqAmount.value),
-    deEsser: dom.deEsser.checked,
-    deEsserFrequency: parseInt(dom.deEsserFrequency.value),
-    deEsserRange: parseFloat(dom.deEsserRange.value),
-    deEsserAttack: parseFloat(dom.deEsserAttack.value),
-    deEsserRelease: parseFloat(dom.deEsserRelease.value),
-    deEsserAudition: false,
-    repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
-    repairPrematureEnding: dom.repairPrematureEnding.checked,
-    repairVocalCrackle: dom.repairVocalCrackle.checked,
-    sampleRate: parseInt(dom.sampleRate.value),
-    bitDepth: parseInt(dom.bitDepth.value),
-    eqLow: parseFloat(dom.eqLow.value),
-    eqLowMid: parseFloat(dom.eqLowMid.value),
-    eqMid: parseFloat(dom.eqMid.value),
-    eqHighMid: parseFloat(dom.eqHighMid.value),
-    eqHigh: parseFloat(dom.eqHigh.value)
-  });
+  const settings = collectMasterSettings({ forExport: true });
 
   const total = batchState.queue.length;
   let completed = 0;
   let errors = 0;
   let qcWarnings = 0;
+  const albumFailures = new Set();
+  let albumReport = null;
+
+  if (settings.batchNormalizationMode === 'album' && settings.normalizeLoudness) {
+    const albumTracks = [];
+    for (let i = 0; i < total; i++) {
+      const item = batchState.queue[i];
+      item.status = 'processing';
+      batchDom.progressText.textContent = `Analyzing album ${i + 1}/${total}: ${item.name}`;
+      renderBatchList();
+      await yieldToUI();
+      try {
+        const audioBuffer = await loadBatchItemAudio(item, settings);
+        const preMaster = await renderMasterPreFinal(settings, audioBuffer);
+        const analysis = measureLUFS(preMaster, { truePeak: false });
+        albumTracks.push({ integratedLUFS: analysis.integratedLUFS, duration: preMaster.duration });
+        item.status = 'pending';
+      } catch (error) {
+        console.error(`Album analysis error for ${item.name}:`, error);
+        item.status = 'error';
+        albumFailures.add(item);
+        errors++;
+      }
+      const percent = Math.round((i + 1) / total * 50);
+      batchDom.progressFill.style.width = `${percent}%`;
+      batchDom.progressPercent.textContent = `${percent}%`;
+    }
+    albumReport = albumTracks.length
+      ? calculateAlbumNormalizationGain(albumTracks, settings.targetLufs)
+      : null;
+  }
 
   for (let i = 0; i < total; i++) {
     const item = batchState.queue[i];
+    if (albumFailures.has(item)) continue;
     item.status = 'processing';
     renderBatchList();
     batchDom.progressText.textContent = `Processing ${i + 1}/${total}: ${item.name}`;
@@ -2877,22 +3132,19 @@ batchDom.exportBtn.addEventListener('click', async () => {
     await yieldToUI();
 
     try {
-      let audioBuffer;
-      if (item.type === 'stem-song') {
-        audioBuffer = await renderStemSongMix(item, settings.sampleRate, false);
-      } else {
-        const ctx = new AudioContext();
-        audioBuffer = await decodeAudioPath(item.path, ctx);
-        await ctx.close();
-      }
+      const audioBuffer = await loadBatchItemAudio(item, settings);
       await yieldToUI();
 
-      const processedBuffer = await processAudioOffline(settings, audioBuffer);
+      const processedBuffer = await processAudioOffline(settings, audioBuffer, albumReport ? {
+        normalizationGain: albumReport.gain,
+        normalizationMode: 'album',
+        albumReport
+      } : {});
       const masteringReport = masteringReports.get(processedBuffer);
       if (masteringReport && !masteringReport.verification.passed) {
         throw new Error(`Mastering QC failed: ${masteringReport.verification.warnings.join('; ')}`);
       }
-      item.qc = formatMasteringQc(masteringReport);
+      item.qc = `${formatMasteringQc(masteringReport)}${albumReport ? ` • Album gain ${albumReport.gainDb >= 0 ? '+' : ''}${albumReport.gainDb.toFixed(1)} dB` : ''}`;
       if (masteringReport?.verification?.warnings.length) qcWarnings++;
       await yieldToUI();
 
@@ -2916,7 +3168,9 @@ batchDom.exportBtn.addEventListener('click', async () => {
       errors++;
     }
 
-    const percent = Math.round(((i + 1) / total) * 100);
+    const percent = albumReport
+      ? 50 + Math.round(((i + 1) / total) * 50)
+      : Math.round(((i + 1) / total) * 100);
     batchDom.progressFill.style.width = `${percent}%`;
     batchDom.progressPercent.textContent = `${percent}%`;
     renderBatchList();
@@ -2926,9 +3180,11 @@ batchDom.exportBtn.addEventListener('click', async () => {
   }
 
   batchState.isProcessing = false;
+  batchDom.progressFill.style.width = '100%';
+  batchDom.progressPercent.textContent = '100%';
   updateBatchButtons();
 
-  batchDom.progressText.textContent = `Done! ${completed} exported${errors ? `, ${errors} failed` : ''}${qcWarnings ? `, ${qcWarnings} QC warnings` : ''}`;
+  batchDom.progressText.textContent = `Done! ${completed} exported${errors ? `, ${errors} failed` : ''}${qcWarnings ? `, ${qcWarnings} QC warnings` : ''}${albumReport ? ` • album ${albumReport.albumLufs.toFixed(1)} LUFS, shared ${albumReport.gainDb >= 0 ? '+' : ''}${albumReport.gainDb.toFixed(1)} dB` : ''}`;
 
   dom.statusMessage.textContent = `${qcWarnings ? '⚠' : '✓'} Batch complete: ${completed}/${total} files exported${qcWarnings ? ` with ${qcWarnings} QC warning${qcWarnings === 1 ? '' : 's'}` : ''}.`;
   dom.statusMessage.className = `status-message ${qcWarnings ? 'warning' : 'success'} visible`;
@@ -2943,6 +3199,9 @@ batchDom.exportBtn.addEventListener('click', async () => {
 
 // ─── Initialization ─────────────────────────────────────────────────────────
 loadSettingsFromStorage();
+renderParametricEqEditor();
+updateStereoDisplays();
 updateChecklist();
 updateEQ();
 refreshFaderFills();
+drawReferenceSpectrumComparison();

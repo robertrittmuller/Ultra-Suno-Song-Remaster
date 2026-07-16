@@ -1,3 +1,6 @@
+import { DELIVERY_PROFILES } from './deliveryProfiles.js';
+import { cloneDefaultEqBands, sanitizeEqBands } from './parametricEq.js';
+
 // Shared audio processing constants
 export const AUDIO_CONSTANTS = {
   // Sample rates
@@ -55,6 +58,10 @@ export const DEFAULT_SETTINGS = {
   targetLufs: AUDIO_CONSTANTS.TARGET_LUFS,
   inputGain: 0,
   stereoWidth: 100,
+  stereoWidthLow: 80,
+  stereoWidthMid: 100,
+  stereoWidthHigh: 110,
+  monoMonitor: false,
   cleanLowEnd: true,
   glueCompression: false,
   centerBass: false,
@@ -74,8 +81,11 @@ export const DEFAULT_SETTINGS = {
   repairEdgeArtifacts: false,
   repairPrematureEnding: false,
   repairVocalCrackle: false,
-  sampleRate: AUDIO_CONSTANTS.SAMPLE_RATE_44K,
-  bitDepth: AUDIO_CONSTANTS.BIT_DEPTH_16,
+  deliveryProfile: 'custom',
+  batchNormalizationMode: 'track',
+  sampleRate: 0,
+  bitDepth: AUDIO_CONSTANTS.BIT_DEPTH_24,
+  eqBands: cloneDefaultEqBands(),
   eqLow: 0,
   eqLowMid: 0,
   eqMid: 0,
@@ -92,6 +102,9 @@ export function validateSettings(settings) {
   validated.targetLufs = Math.max(-20, Math.min(-6, validated.targetLufs));
   validated.inputGain = Math.max(-12, Math.min(12, validated.inputGain));
   validated.stereoWidth = Math.max(0, Math.min(200, validated.stereoWidth));
+  validated.stereoWidthLow = Math.max(0, Math.min(200, validated.stereoWidthLow));
+  validated.stereoWidthMid = Math.max(0, Math.min(200, validated.stereoWidthMid));
+  validated.stereoWidthHigh = Math.max(0, Math.min(200, validated.stereoWidthHigh));
   validated.dynamicEqAmount = Math.max(0, Math.min(100, validated.dynamicEqAmount));
   validated.deEsserFrequency = Math.max(4000, Math.min(10000, validated.deEsserFrequency));
   validated.deEsserRange = Math.max(1, Math.min(10, validated.deEsserRange));
@@ -104,12 +117,15 @@ export function validateSettings(settings) {
   validated.eqHigh = Math.max(-12, Math.min(12, validated.eqHigh));
   
   // Validate enums
-  if (![44100, 48000].includes(validated.sampleRate)) {
-    validated.sampleRate = AUDIO_CONSTANTS.SAMPLE_RATE_44K;
+  if (![0, 44100, 48000, 96000].includes(validated.sampleRate)) {
+    validated.sampleRate = 0;
   }
   if (![16, 24].includes(validated.bitDepth)) {
-    validated.bitDepth = AUDIO_CONSTANTS.BIT_DEPTH_16;
+    validated.bitDepth = AUDIO_CONSTANTS.BIT_DEPTH_24;
   }
+  if (!DELIVERY_PROFILES[validated.deliveryProfile]) validated.deliveryProfile = 'custom';
+  if (!['track', 'album'].includes(validated.batchNormalizationMode)) validated.batchNormalizationMode = 'track';
+  validated.eqBands = sanitizeEqBands(validated.eqBands, validated);
   
   return validated;
 }

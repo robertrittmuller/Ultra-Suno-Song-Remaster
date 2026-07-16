@@ -1045,6 +1045,173 @@ html[data-platform="darwin"] .window-controls {
   border-color: var(--theme-accent);
 }
 
+.parametric-eq-header,
+.parametric-eq-row {
+  display: grid;
+  grid-template-columns: 28px minmax(88px, 0.9fr) minmax(120px, 1.5fr) minmax(76px, 0.8fr) minmax(68px, 0.7fr) minmax(74px, 0.75fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.parametric-eq-header {
+  padding: 0 8px 6px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.parametric-eq-row {
+  padding: 7px 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.parametric-eq-row select,
+.parametric-eq-row input[type="number"],
+.stem-parametric-row select,
+.stem-parametric-row input[type="number"] {
+  width: 100%;
+  min-width: 0;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.parametric-eq-row input[type="checkbox"] {
+  justify-self: center;
+}
+
+.correlation-meter {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.correlation-track {
+  position: relative;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--red) 0 49%, var(--border) 49% 51%, var(--green) 51% 100%);
+}
+
+.correlation-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 0;
+  background: var(--theme-accent);
+  transform-origin: left center;
+  transition: width 80ms linear, transform 80ms linear;
+}
+
+.correlation-fill.negative {
+  background: var(--red);
+  transform: scaleX(-1);
+}
+
+.correlation-value {
+  min-width: 34px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.reference-panel {
+  margin-top: 0;
+  padding: 10px 12px 12px;
+}
+
+.reference-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.reference-header h3 {
+  margin-right: auto;
+}
+
+.reference-match,
+#referenceStatus {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.reference-match {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+#referenceSpectrumCanvas {
+  display: block;
+  width: 100%;
+  height: 112px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--spectrogram-bg);
+}
+
+.reference-legend {
+  display: flex;
+  gap: 14px;
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.reference-legend span::before {
+  display: inline-block;
+  width: 16px;
+  height: 2px;
+  margin-right: 5px;
+  vertical-align: middle;
+  background: var(--theme-accent);
+  content: "";
+}
+
+.reference-legend .reference-legend-line::before {
+  background: #22d3ee;
+}
+
+.stem-parametric-eq {
+  display: grid;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.stem-parametric-row {
+  display: grid;
+  grid-template-columns: 22px minmax(75px, 1fr) minmax(84px, 1.2fr) minmax(62px, 0.8fr) minmax(58px, 0.7fr) minmax(64px, 0.8fr);
+  align-items: center;
+  gap: 5px;
+}
+
+.stem-parametric-row input,
+.stem-parametric-row select {
+  font-size: 10px;
+}
+
+@media (max-width: 900px) {
+  .parametric-eq-header {
+    display: none;
+  }
+
+  .parametric-eq-row {
+    grid-template-columns: 28px repeat(2, minmax(90px, 1fr));
+  }
+}
+
 /* Badges */
 .live-badge {
   font-size: 7px;
@@ -1189,6 +1356,11 @@ html[data-platform="darwin"] .window-controls {
   cursor: pointer;
   transition: all 0.15s;
   max-width: 70px;
+}
+
+#deliveryProfile,
+#batchNormalizationMode {
+  max-width: 108px;
 }
 
 .select-row select option {

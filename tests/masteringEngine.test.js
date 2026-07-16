@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   MONO_BASS_FREQUENCY,
+  STEREO_HIGH_CROSSOVER,
   configureMasteringNodes,
+  configureStereoImaging,
   connectMasteringGraph,
   createMasteringNodes,
   updateMatchedBypassGain
@@ -61,7 +63,27 @@ test('width and mono bass precede normalization and final limiting', () => {
   assert.equal(nodes.stereoMerger.connections[0], nodes.normGain);
   assert.equal(nodes.normGain.connections[0], limiter);
   assert.equal(limiter.connections[0], nodes.gain);
-  assert.equal(nodes.sideGain.connections[0], nodes.sideBassHighpass1);
+  assert.equal(nodes.sideGain.connections[0], nodes.sideLowShelf);
+  assert.equal(nodes.sideLowShelf.connections[0], nodes.sideHighShelf);
+  assert.equal(nodes.sideHighShelf.connections[0], nodes.sideBassHighpass1);
+});
+
+test('frequency-dependent width maps low, mid, and high side energy independently', () => {
+  const context = fakeContext();
+  const nodes = createMasteringNodes(context, new FakeNode('gain'), { glueCompression: false });
+  configureStereoImaging(nodes, {
+    stereoWidthLow: 80,
+    stereoWidthMid: 100,
+    stereoWidthHigh: 125
+  });
+  assert.equal(nodes.sideGain.gain.value, 1);
+  assert.equal(nodes.sideLowShelf.frequency.value, MONO_BASS_FREQUENCY);
+  assert.ok(Math.abs(nodes.sideLowShelf.gain.value - 20 * Math.log10(0.8)) < 1e-12);
+  assert.equal(nodes.sideHighShelf.frequency.value, STEREO_HIGH_CROSSOVER);
+  assert.ok(Math.abs(nodes.sideHighShelf.gain.value - 20 * Math.log10(1.25)) < 1e-12);
+
+  configureStereoImaging(nodes, { monoMonitor: true });
+  assert.equal(nodes.sideGain.gain.value, 0.001);
 });
 
 test('disabled glue uses a latency-free gain bypass', () => {
@@ -81,6 +103,18 @@ test('adaptive studio dynamics precede glue compression and stereo processing', 
   assert.equal(nodes.highshelf.connections[0], studioDynamics);
   assert.equal(studioDynamics.connections[0], nodes.compressor);
   assert.equal(nodes.compressor.connections[0], nodes.stereoSplitter);
+});
+
+test('parametric EQ is placed before fixed corrective polish and dynamics', () => {
+  const context = fakeContext();
+  const parametricEq = new FakeNode('parametric-eq');
+  const nodes = createMasteringNodes(context, new FakeNode('gain'), {
+    glueCompression: false,
+    parametricEq
+  });
+  connectMasteringGraph(new FakeNode('source'), nodes);
+  assert.equal(nodes.highpass.connections[0], parametricEq);
+  assert.equal(parametricEq.connections[0], nodes.lowshelf);
 });
 
 test('loudness-matched bypass follows measured wet-to-dry energy without unsafe gain jumps', () => {

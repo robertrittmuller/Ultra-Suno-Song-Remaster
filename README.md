@@ -12,18 +12,21 @@ A professional desktop app for mastering AI-generated music to streaming-ready q
 - **Loudness Normalization** - Adjustable target LUFS (-20 to -6 LUFS)
 - **True Peak Limiting** - 4× inter-sample detection, linked lookahead limiting, and post-render dBTP verification
 - **Input Gain Control** - Adjust input level before processing (-12 to +12 dB)
-- **Stereo Width** - Control stereo image (0% mono to 200% extra wide) with optional 120Hz mono bass
-- **5-Band EQ** - Fine-tune with visual faders and presets (Flat, Vocal Boost, Bass Boost, Bright, Warm, AI Fix)
+- **Multiband Stereo Imaging** - Independent low, mid, and high width with optional 120Hz mono bass, mono monitoring, and a live correlation meter
+- **Parametric EQ** - Five configurable bell, shelf, pass, or notch bands with frequency, gain, Q, stereo/mid/side targeting, and musical presets
 - **3-Band Dynamic EQ** - Stereo-linked adaptive control for intermittent boom, boxiness, and harshness without permanent tonal cuts
 - **Dedicated De-Esser** - Adjustable 4–10kHz focus, maximum range, attack/release, and monitor-only reduction audition
 - **Stem-Aware Compression** - Vocal, Bass, Drums, and Music presets plus threshold, ratio, attack, release, knee, maximum reduction, parallel mix, makeup, and live gain-reduction metering
 - **True Original A/B** - FX Off routes the untouched source audio, bypassing restoration, stem processing, mastering, gain, normalization, and limiting
+- **Reference A/B** - Load a commercial reference, switch playback at the same timeline position, loudness-match it, and compare average spectra
 - **Quick Fix Tools** - Glue compression, clean low end
 - **Polish Effects** - Cut mud, add air, tame harshness
 - **Analysis-Gated Restoration** - Optional stereo-linked boundary declicking, hard-cut ending repair, and quiet-passage decrackling
 - **Real-time Preview** - Hear all changes live before exporting, preview any queued file
 - **Clipping Detection** - Visual CLIP indicators on meters
-- **High-Quality Export** - WAV output at 44.1/48kHz, 16/24-bit with embedded metadata
+- **Album-Relative Normalization** - A two-pass batch mode calculates one shared gain so intentional song-to-song loudness differences are preserved
+- **Delivery Profiles** - Streaming Safe, Loud Streaming, CD, Video, and Apple 24-bit targets plus custom settings
+- **High-Quality Export** - Native, 44.1, 48, or 96kHz WAV output at 16/24-bit with embedded metadata
 - **Post-Render QC** - Verifies integrated LUFS, true peak, loudness range, and limiter gain reduction before writing
 
 ## Download

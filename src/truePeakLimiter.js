@@ -138,7 +138,7 @@ export function verifyMaster(audioBuffer, settings, limiterReport = null) {
     warnings.push(`true peak is ${analysis.truePeakDB.toFixed(2)} dBTP with limiting disabled`);
   }
 
-  if (settings.normalizeLoudness && Number.isFinite(analysis.integratedLUFS)) {
+  if (settings.normalizeLoudness && settings.normalizationMode !== 'album' && Number.isFinite(analysis.integratedLUFS)) {
     const loudnessDelta = analysis.integratedLUFS - settings.targetLufs;
     if (Math.abs(loudnessDelta) > 1) {
       warnings.push(`final loudness is ${analysis.integratedLUFS.toFixed(1)} LUFS (${loudnessDelta > 0 ? '+' : ''}${loudnessDelta.toFixed(1)} LU from target)`);
@@ -152,11 +152,13 @@ export function verifyMaster(audioBuffer, settings, limiterReport = null) {
 }
 
 /** Applies loudness drive, final limiting, then post-render QC to a buffer. */
-export function finalizeMaster(audioBuffer, settings) {
+export function finalizeMaster(audioBuffer, settings, options = {}) {
   const preAnalysis = measureLUFS(audioBuffer, { truePeak: false });
-  const normalizationGain = settings.normalizeLoudness
-    ? calculateNormalizationGain(preAnalysis.integratedLUFS, settings.targetLufs)
-    : 1;
+  const normalizationGain = Number.isFinite(options.normalizationGain)
+    ? options.normalizationGain
+    : settings.normalizeLoudness
+      ? calculateNormalizationGain(preAnalysis.integratedLUFS, settings.targetLufs)
+      : 1;
   applyLinearGain(audioBuffer, normalizationGain);
 
   const limiter = settings.truePeakLimit

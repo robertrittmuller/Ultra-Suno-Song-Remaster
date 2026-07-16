@@ -3,6 +3,7 @@ import { AUDIO_CONSTANTS } from './audioConstants.js';
 const loadedWorkletContexts = new WeakSet();
 const TRUE_PEAK_WORKLET_URL = new URL('./truePeakLimiter.worklet.js', import.meta.url);
 export const MONO_BASS_FREQUENCY = 120;
+export const STEREO_HIGH_CROSSOVER = 4000;
 export const GLUE_COMPRESSOR_LATENCY_SECONDS = 0.006;
 
 export function updateMatchedBypassGain(currentGain, wetEnergy, dryEnergy, smoothing = 0.9) {
@@ -44,6 +45,7 @@ export function createMasteringNodes(context, limiter, options = {}) {
     highshelf: context.createBiquadFilter(),
     midPeak: context.createBiquadFilter(),
     midPeak2: context.createBiquadFilter(),
+    parametricEq: options.parametricEq || context.createGain(),
     studioDynamics: options.studioDynamics || context.createGain(),
     // DynamicsCompressorNode has a fixed 6 ms lookahead even at 1:1. Use a
     // true GainNode bypass when glue is disabled so clean exports are not
@@ -66,31 +68,29 @@ export function createMasteringNodes(context, limiter, options = {}) {
     sideToRight: context.createGain(),
     sideBassHighpass1: context.createBiquadFilter(),
     sideBassHighpass2: context.createBiquadFilter(),
-    eqLow: context.createBiquadFilter(),
-    eqLowMid: context.createBiquadFilter(),
-    eqMid: context.createBiquadFilter(),
-    eqHighMid: context.createBiquadFilter(),
-    eqHigh: context.createBiquadFilter()
+    sideLowShelf: context.createBiquadFilter(),
+    sideHighShelf: context.createBiquadFilter()
   };
-  configureEqNodes(nodes);
   configureMasteringNodes(nodes, {});
   return nodes;
 }
 
-export function configureEqNodes(nodes) {
-  nodes.eqLow.type = 'lowshelf';
-  nodes.eqLow.frequency.value = AUDIO_CONSTANTS.FREQ_LOW;
-  nodes.eqLowMid.type = 'peaking';
-  nodes.eqLowMid.frequency.value = AUDIO_CONSTANTS.FREQ_LOW_MID;
-  nodes.eqLowMid.Q.value = 1;
-  nodes.eqMid.type = 'peaking';
-  nodes.eqMid.frequency.value = AUDIO_CONSTANTS.FREQ_MID;
-  nodes.eqMid.Q.value = 1;
-  nodes.eqHighMid.type = 'peaking';
-  nodes.eqHighMid.frequency.value = AUDIO_CONSTANTS.FREQ_HIGH_MID;
-  nodes.eqHighMid.Q.value = 1;
-  nodes.eqHigh.type = 'highshelf';
-  nodes.eqHigh.frequency.value = AUDIO_CONSTANTS.FREQ_HIGH;
+function widthRatioDb(width, reference) {
+  return 20 * Math.log10(Math.max(0.1, width) / Math.max(0.1, reference));
+}
+
+export function configureStereoImaging(nodes, settings = {}) {
+  const monoMonitor = Boolean(settings.monoMonitor);
+  const lowWidth = monoMonitor ? 0 : (settings.stereoWidthLow ?? 100);
+  const midWidth = monoMonitor ? 0 : (settings.stereoWidthMid ?? settings.stereoWidth ?? 100);
+  const highWidth = monoMonitor ? 0 : (settings.stereoWidthHigh ?? settings.stereoWidth ?? 100);
+  nodes.sideGain.gain.value = Math.max(0.001, midWidth / 100);
+  nodes.sideLowShelf.type = 'lowshelf';
+  nodes.sideLowShelf.frequency.value = MONO_BASS_FREQUENCY;
+  nodes.sideLowShelf.gain.value = widthRatioDb(lowWidth, midWidth);
+  nodes.sideHighShelf.type = 'highshelf';
+  nodes.sideHighShelf.frequency.value = STEREO_HIGH_CROSSOVER;
+  nodes.sideHighShelf.gain.value = widthRatioDb(highWidth, midWidth);
 }
 
 export function setLimiterParameters(limiter, enabled, ceilingDb) {
@@ -151,6 +151,7 @@ export function configureMasteringNodes(nodes, settings = {}) {
   const monoBassFrequency = settings.centerBass ? MONO_BASS_FREQUENCY : 1;
   nodes.sideBassHighpass1.frequency.value = monoBassFrequency;
   nodes.sideBassHighpass2.frequency.value = monoBassFrequency;
+  configureStereoImaging(nodes, settings);
 
   setLimiterParameters(
     nodes.limiter,
@@ -163,11 +164,7 @@ export function connectMasteringGraph(source, nodes) {
   source
     .connect(nodes.inputGain)
     .connect(nodes.highpass)
-    .connect(nodes.eqLow)
-    .connect(nodes.eqLowMid)
-    .connect(nodes.eqMid)
-    .connect(nodes.eqHighMid)
-    .connect(nodes.eqHigh)
+    .connect(nodes.parametricEq)
     .connect(nodes.lowshelf)
     .connect(nodes.midPeak)
     .connect(nodes.midPeak2)
@@ -197,6 +194,8 @@ export function connectMasteringGraph(source, nodes) {
   nodes.midGain.connect(nodes.midToLeft);
   nodes.midGain.connect(nodes.midToRight);
   nodes.sideGain
+    .connect(nodes.sideLowShelf)
+    .connect(nodes.sideHighShelf)
     .connect(nodes.sideBassHighpass1)
     .connect(nodes.sideBassHighpass2)
     .connect(nodes.sideToLeft);

@@ -115,6 +115,12 @@
       </div>
     </div>
 
+    <div class="settings-card reference-panel" aria-label="Reference track comparison">
+      <div class="reference-header"><h3>Reference A/B</h3><button id="loadReference" class="btn-batch" aria-label="Load reference track">Load Reference</button><button id="toggleReference" class="btn-batch" disabled aria-label="Toggle source and reference playback">A: Source</button><label class="reference-match"><input id="referenceLevelMatch" type="checkbox" checked> Loudness Match</label><span id="referenceStatus">No reference loaded</span></div>
+      <canvas id="referenceSpectrumCanvas" class="reference-spectrum" aria-label="Source and reference spectrum comparison"></canvas>
+      <div class="reference-legend"><span class="source-legend">Source / Master</span><span class="reference-legend-line">Reference</span></div>
+    </div>
+
     <!-- Keyboard Shortcuts Help -->
     <div class="shortcuts-hint" aria-label="Keyboard shortcuts">
       <span>Space: Play/Pause</span>
@@ -229,16 +235,20 @@
 
       <div class="settings-card">
         <h3>Stereo</h3>
-        <div class="slider-row" data-tip="Stereo width: 0% = mono, 100% = original, 200% = extra wide.">
-          <span>Width</span>
-          <input type="range" id="stereoWidth" min="0" max="200" step="1" value="100" aria-label="Stereo width">
-          <span class="slider-value" id="stereoWidthValue">100%</span>
-        </div>
+        <div class="slider-row" data-tip="Low-frequency side width below approximately 120Hz."><span>Low</span><input type="range" id="stereoWidthLow" min="0" max="200" step="1" value="80" aria-label="Low-frequency stereo width"><span class="slider-value" id="stereoWidthLowValue">80%</span></div>
+        <div class="slider-row" data-tip="Mid-band side width between approximately 120Hz and 4kHz."><span>Mid</span><input type="range" id="stereoWidthMid" min="0" max="200" step="1" value="100" aria-label="Mid-frequency stereo width"><span class="slider-value" id="stereoWidthMidValue">100%</span></div>
+        <div class="slider-row" data-tip="High-frequency side width above approximately 4kHz."><span>High</span><input type="range" id="stereoWidthHigh" min="0" max="200" step="1" value="110" aria-label="High-frequency stereo width"><span class="slider-value" id="stereoWidthHighValue">110%</span></div>
         <label class="toggle-row" data-tip="Makes bass frequencies mono for better club/speaker compatibility.">
           <span>Mono Bass</span>
           <input type="checkbox" id="centerBass" aria-label="Enable mono bass">
           <span class="toggle" aria-hidden="true"></span>
         </label>
+        <label class="toggle-row" data-tip="Monitor the preview in mono to check translation. This is never applied to exports.">
+          <span>Monitor Mono</span>
+          <input type="checkbox" id="monoMonitor" aria-label="Monitor preview in mono">
+          <span class="toggle" aria-hidden="true"></span>
+        </label>
+        <div class="correlation-meter" role="meter" aria-label="Stereo phase correlation" aria-valuemin="-1" aria-valuemax="1" aria-valuenow="1"><span>Correlation</span><div class="correlation-track"><div id="correlationFill" class="correlation-fill"></div></div><output id="correlationValue">+1.00</output></div>
       </div>
 
       <div class="settings-card">
@@ -312,20 +322,24 @@
 
       <div class="settings-card">
         <h3>Output</h3>
+        <div class="select-row" data-tip="Apply a complete delivery target. Custom is selected after manual output changes."><span>Profile</span><select id="deliveryProfile" aria-label="Delivery profile"><option value="custom">Custom</option><option value="streamingSafe">Streaming Safe</option><option value="loudStreaming">Loud Streaming</option><option value="cd">CD</option><option value="video">Video</option><option value="appleDigitalMasters">Apple 24-bit</option></select></div>
         <div class="select-row" data-tip="44.1kHz is CD quality and Spotify standard. 48kHz for video.">
           <span>Sample Rate</span>
           <select id="sampleRate" aria-label="Output sample rate">
+            <option value="0" selected>Native</option>
             <option value="44100">44.1 kHz</option>
             <option value="48000">48 kHz</option>
+            <option value="96000">96 kHz</option>
           </select>
         </div>
         <div class="select-row" data-tip="16-bit is CD quality. 24-bit has more dynamic range.">
           <span>Bit Depth</span>
           <select id="bitDepth" aria-label="Output bit depth">
             <option value="16">16-bit</option>
-            <option value="24">24-bit</option>
+            <option value="24" selected>24-bit</option>
           </select>
         </div>
+        <div class="select-row" data-tip="Album mode calculates one shared loudness gain for the complete batch, preserving intentional song-to-song level differences."><span>Batch Level</span><select id="batchNormalizationMode" aria-label="Batch loudness normalization mode"><option value="track">Per Track</option><option value="album">Album Relative</option></select></div>
       </div>
     </div>
 
@@ -372,60 +386,10 @@
         </label>
       </div>
 
-      <div class="settings-card eq-card">
-        <h3>EQ</h3>
-        <div class="eq-bands" role="group" aria-label="5-band equalizer">
-          <div class="eq-band">
-            <span class="band-freq-top">80HZ</span>
-            <div class="eq-slider-container">
-              <div class="eq-track">
-                <div class="eq-fill" id="eqLowFill"></div>
-              </div>
-              <input type="range" class="eq-slider" id="eqLow" min="-12" max="12" value="0" orient="vertical" aria-label="EQ 80Hz band gain">
-            </div>
-            <span class="band-value" id="eqLowVal">0 dB</span>
-          </div>
-          <div class="eq-band">
-            <span class="band-freq-top">250HZ</span>
-            <div class="eq-slider-container">
-              <div class="eq-track">
-                <div class="eq-fill" id="eqLowMidFill"></div>
-              </div>
-              <input type="range" class="eq-slider" id="eqLowMid" min="-12" max="12" value="0" orient="vertical" aria-label="EQ 250Hz band gain">
-            </div>
-            <span class="band-value" id="eqLowMidVal">0 dB</span>
-          </div>
-          <div class="eq-band">
-            <span class="band-freq-top">1KHZ</span>
-            <div class="eq-slider-container">
-              <div class="eq-track">
-                <div class="eq-fill" id="eqMidFill"></div>
-              </div>
-              <input type="range" class="eq-slider" id="eqMid" min="-12" max="12" value="0" orient="vertical" aria-label="EQ 1kHz band gain">
-            </div>
-            <span class="band-value" id="eqMidVal">0 dB</span>
-          </div>
-          <div class="eq-band">
-            <span class="band-freq-top">4KHZ</span>
-            <div class="eq-slider-container">
-              <div class="eq-track">
-                <div class="eq-fill" id="eqHighMidFill"></div>
-              </div>
-              <input type="range" class="eq-slider" id="eqHighMid" min="-12" max="12" value="0" orient="vertical" aria-label="EQ 4kHz band gain">
-            </div>
-            <span class="band-value" id="eqHighMidVal">0 dB</span>
-          </div>
-          <div class="eq-band">
-            <span class="band-freq-top">12KHZ</span>
-            <div class="eq-slider-container">
-              <div class="eq-track">
-                <div class="eq-fill" id="eqHighFill"></div>
-              </div>
-              <input type="range" class="eq-slider" id="eqHigh" min="-12" max="12" value="0" orient="vertical" aria-label="EQ 12kHz band gain">
-            </div>
-            <span class="band-value" id="eqHighVal">0 dB</span>
-          </div>
-        </div>
+      <div class="settings-card eq-card parametric-eq-card">
+        <h3>Parametric EQ <span class="live-badge">M/S</span></h3>
+        <div class="parametric-eq-header" aria-hidden="true"><span>On</span><span>Type</span><span>Frequency</span><span>Gain</span><span>Q</span><span>Mode</span></div>
+        <div id="parametricEqBands" class="parametric-eq-bands" role="group" aria-label="Five-band parametric equalizer"></div>
         <div class="eq-presets" role="group" aria-label="EQ presets">
           <button class="preset-btn active" data-preset="flat">Flat</button>
           <button class="preset-btn" data-preset="vocal">Vocal Boost</button>
