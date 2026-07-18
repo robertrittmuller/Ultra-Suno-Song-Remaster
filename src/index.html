@@ -281,6 +281,16 @@
 
       <div class="settings-card">
         <h3>Restoration</h3>
+        <label class="toggle-row" data-tip="Learns a noise profile from the quietest usable passages, then applies stereo-linked spectral reduction with time/frequency smoothing. Designed for steady hiss, hum, fan, and room noise; audition before export.">
+          <span>High-Quality Denoise</span>
+          <input type="checkbox" id="noiseReduction" aria-label="Enable high-quality broadband noise reduction">
+          <span class="toggle" aria-hidden="true"></span>
+        </label>
+        <div class="slider-row restoration-amount-row" data-tip="Sets the maximum spectral attenuation. Lower values retain more ambience; higher values remove more steady noise but can sound drier.">
+          <span>Reduction</span>
+          <input type="range" id="noiseReductionAmount" min="0" max="100" step="1" value="50" aria-label="Noise reduction amount">
+          <span class="slider-value" id="noiseReductionAmountValue">50%</span>
+        </div>
         <label class="toggle-row" data-tip="Stereo-linked repair of isolated pops plus short broadband static bursts at either boundary when they are bracketed by silence. Audition the repaired buffer before export.">
           <span>Repair Edge Artifacts</span>
           <input type="checkbox" id="repairEdgeArtifacts" aria-label="Repair detected audio artifacts at file boundaries">

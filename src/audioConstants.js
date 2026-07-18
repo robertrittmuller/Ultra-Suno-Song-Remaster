@@ -81,6 +81,8 @@ export const DEFAULT_SETTINGS = {
   repairEdgeArtifacts: false,
   repairPrematureEnding: false,
   repairVocalCrackle: false,
+  noiseReduction: false,
+  noiseReductionAmount: 50,
   deliveryProfile: 'custom',
   batchNormalizationMode: 'track',
   sampleRate: 0,
@@ -110,6 +112,7 @@ export function validateSettings(settings) {
   validated.deEsserRange = Math.max(1, Math.min(10, validated.deEsserRange));
   validated.deEsserAttack = Math.max(1, Math.min(30, validated.deEsserAttack));
   validated.deEsserRelease = Math.max(30, Math.min(300, validated.deEsserRelease));
+  validated.noiseReductionAmount = Math.max(0, Math.min(100, validated.noiseReductionAmount));
   validated.eqLow = Math.max(-12, Math.min(12, validated.eqLow));
   validated.eqLowMid = Math.max(-12, Math.min(12, validated.eqLowMid));
   validated.eqMid = Math.max(-12, Math.min(12, validated.eqMid));

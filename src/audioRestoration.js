@@ -4,6 +4,268 @@
 
 const EPSILON = 1e-9;
 
+function clamp(value, minimum, maximum) {
+  return Math.max(minimum, Math.min(maximum, value));
+}
+
+// In-place radix-2 FFT used by the offline restoration path. Keeping the
+// transform here avoids a native/FFmpeg dependency and makes preview and
+// export use the exact same spectral treatment.
+function fft(real, imaginary, inverse = false) {
+  const length = real.length;
+  let reversed = 0;
+  for (let index = 1; index < length; index++) {
+    let bit = length >> 1;
+    while (reversed & bit) {
+      reversed ^= bit;
+      bit >>= 1;
+    }
+    reversed ^= bit;
+    if (reversed <= index) continue;
+    [real[index], real[reversed]] = [real[reversed], real[index]];
+    [imaginary[index], imaginary[reversed]] = [imaginary[reversed], imaginary[index]];
+  }
+
+  for (let size = 2; size <= length; size *= 2) {
+    const half = size / 2;
+    const angle = (inverse ? 2 : -2) * Math.PI / size;
+    const stepReal = Math.cos(angle);
+    const stepImaginary = Math.sin(angle);
+    for (let start = 0; start < length; start += size) {
+      let twiddleReal = 1;
+      let twiddleImaginary = 0;
+      for (let offset = 0; offset < half; offset++) {
+        const even = start + offset;
+        const odd = even + half;
+        const oddReal = real[odd] * twiddleReal - imaginary[odd] * twiddleImaginary;
+        const oddImaginary = real[odd] * twiddleImaginary + imaginary[odd] * twiddleReal;
+        real[odd] = real[even] - oddReal;
+        imaginary[odd] = imaginary[even] - oddImaginary;
+        real[even] += oddReal;
+        imaginary[even] += oddImaginary;
+        const nextReal = twiddleReal * stepReal - twiddleImaginary * stepImaginary;
+        twiddleImaginary = twiddleReal * stepImaginary + twiddleImaginary * stepReal;
+        twiddleReal = nextReal;
+      }
+    }
+  }
+
+  if (inverse) {
+    for (let index = 0; index < length; index++) {
+      real[index] /= length;
+      imaginary[index] /= length;
+    }
+  }
+}
+
+function createSineWindow(length) {
+  const window = new Float64Array(length);
+  for (let index = 0; index < length; index++) {
+    // With 50% overlap, adjacent squared sine windows sum to one. Applying
+    // this window on analysis and synthesis therefore reconstructs cleanly.
+    window[index] = Math.sin(Math.PI * (index + 0.5) / length);
+  }
+  return window;
+}
+
+function frameLinkedRms(channels, start, length) {
+  let sum = 0;
+  for (const channel of channels) {
+    for (let offset = 0; offset < length; offset++) {
+      const sample = channel[start + offset];
+      sum += sample * sample;
+    }
+  }
+  return Math.sqrt(sum / Math.max(1, length * channels.length));
+}
+
+function frameSpectrum(channel, start, window, real, imaginary) {
+  const length = window.length;
+  real.fill(0);
+  imaginary.fill(0);
+  for (let offset = 0; offset < length; offset++) {
+    const index = start + offset;
+    if (index >= 0 && index < channel.length) real[offset] = channel[index] * window[offset];
+  }
+  fft(real, imaginary);
+}
+
+function estimateNoiseProfile(channels, window, hopSize) {
+  const fftSize = window.length;
+  const binCount = fftSize / 2 + 1;
+  const candidates = [];
+  for (let start = 0; start + fftSize <= channels[0].length; start += hopSize) {
+    const rms = frameLinkedRms(channels, start, fftSize);
+    // Do not learn digital silence as the noise floor. Conversely, ignoring
+    // material below -100 dBFS keeps a clean source sample-identical.
+    if (rms > 1e-5) candidates.push({ start, rms });
+  }
+  if (!candidates.length) return null;
+
+  candidates.sort((left, right) => left.rms - right.rms);
+  const selectionCount = Math.min(32, Math.max(4, Math.ceil(candidates.length * 0.08)));
+  const selected = candidates.slice(0, selectionCount);
+  const spectra = selected.map(() => new Float64Array(binCount));
+  const real = new Float64Array(fftSize);
+  const imaginary = new Float64Array(fftSize);
+
+  selected.forEach((frame, frameIndex) => {
+    for (const channel of channels) {
+      frameSpectrum(channel, frame.start, window, real, imaginary);
+      for (let bin = 0; bin < binCount; bin++) {
+        spectra[frameIndex][bin] +=
+          (real[bin] * real[bin] + imaginary[bin] * imaginary[bin]) / channels.length;
+      }
+    }
+  });
+
+  const power = new Float64Array(binCount);
+  const binValues = new Array(selected.length);
+  for (let bin = 0; bin < binCount; bin++) {
+    for (let frame = 0; frame < selected.length; frame++) binValues[frame] = spectra[frame][bin];
+    binValues.sort((left, right) => left - right);
+    // A median is robust to a quiet frame that still contains a note or a
+    // short transient, while retaining tonal hum in the learned profile.
+    const middle = Math.floor(binValues.length / 2);
+    power[bin] = binValues.length % 2
+      ? binValues[middle]
+      : (binValues[middle - 1] + binValues[middle]) * 0.5;
+  }
+
+  const representativeRms = selected[Math.floor(selected.length / 2)].rms;
+  const typicalRms = candidates[Math.floor(candidates.length / 2)].rms;
+  let averagePower = 0;
+  for (let bin = 1; bin < binCount; bin++) averagePower += power[bin];
+  averagePower /= Math.max(1, binCount - 1);
+  let averageLogPower = 0;
+  for (let bin = 1; bin < binCount; bin++) {
+    averageLogPower += Math.log(Math.max(power[bin], averagePower * 1e-12, EPSILON));
+  }
+  const spectralFlatness = Math.exp(averageLogPower / Math.max(1, binCount - 1)) /
+    Math.max(averagePower, EPSILON);
+  const quietSeparationDb = 20 * Math.log10(
+    Math.max(EPSILON, representativeRms) / Math.max(EPSILON, typicalRms)
+  );
+
+  // A persistent pitched source with no quieter passage is not a trustworthy
+  // noise profile: it is more likely sustained music than hum. Broadband noise
+  // can still be learned from a constant-level recording because its spectral
+  // flatness makes the distinction reliable.
+  if (spectralFlatness < 0.08 && quietSeparationDb > -6) return null;
+  return {
+    power,
+    frameCount: selected.length,
+    floorDb: 20 * Math.log10(Math.max(EPSILON, representativeRms))
+  };
+}
+
+/**
+ * Reduces steady broadband noise and hum with an automatically learned noise
+ * profile, a soft Wiener mask, and stereo-linked time/frequency smoothing.
+ * A common gain mask preserves the stereo image; 50%-overlapped sine windows
+ * avoid block boundaries and the conservative floor prevents hollow artifacts.
+ */
+export function reduceBroadbandNoise(channels, sampleRate, options = {}) {
+  const length = channels[0]?.length || 0;
+  const amount = clamp(Number(options.amount ?? options.noiseReductionAmount ?? 50), 0, 100);
+  const emptyReport = { noiseReductionDb: 0, noiseFloorDb: -Infinity, noiseFrames: 0 };
+  if (!length || !channels.length || amount <= 0 || length < sampleRate * 0.1) return emptyReport;
+
+  const fftSize = sampleRate >= 88200 ? 4096 : 2048;
+  if (length < fftSize) return emptyReport;
+  const hopSize = fftSize / 2;
+  const binCount = fftSize / 2 + 1;
+  const window = createSineWindow(fftSize);
+  const profile = estimateNoiseProfile(channels, window, hopSize);
+  if (!profile || profile.floorDb < -96) return emptyReport;
+
+  const output = channels.map(() => new Float64Array(length));
+  const normalization = new Float64Array(length);
+  const real = channels.map(() => new Float64Array(fftSize));
+  const imaginary = channels.map(() => new Float64Array(fftSize));
+  const rawGain = new Float64Array(binCount);
+  const gain = new Float64Array(binCount);
+  const previousGain = new Float64Array(binCount);
+  previousGain.fill(1);
+
+  const minimumGain = Math.pow(10, -(6 + amount * 0.14) / 20);
+  const subtraction = 0.8 + amount * 0.014;
+  let firstFrame = true;
+  let inputPower = 0;
+  let outputPower = 0;
+
+  for (let start = -fftSize / 2; start < length; start += hopSize) {
+    for (let channel = 0; channel < channels.length; channel++) {
+      frameSpectrum(channels[channel], start, window, real[channel], imaginary[channel]);
+    }
+
+    for (let bin = 0; bin < binCount; bin++) {
+      let linkedPower = 0;
+      for (let channel = 0; channel < channels.length; channel++) {
+        linkedPower += real[channel][bin] ** 2 + imaginary[channel][bin] ** 2;
+      }
+      linkedPower /= channels.length;
+      const cleanFraction = Math.max(0, 1 - subtraction * profile.power[bin] / (linkedPower + EPSILON));
+      rawGain[bin] = Math.max(minimumGain, Math.sqrt(cleanFraction));
+      inputPower++;
+    }
+
+    // Fill narrow gain holes rather than cutting isolated bins. This preserves
+    // tonal peaks and suppresses the metallic "musical noise" of hard gates.
+    for (let bin = 0; bin < binCount; bin++) {
+      const neighborAverage = (
+        rawGain[Math.max(0, bin - 1)] + rawGain[bin] * 2 + rawGain[Math.min(binCount - 1, bin + 1)]
+      ) / 4;
+      const target = Math.max(rawGain[bin], neighborAverage);
+      if (firstFrame) {
+        gain[bin] = target;
+      } else {
+        // Reduction engages slowly but releases quickly for transients.
+        const blend = target < previousGain[bin] ? 0.28 : 0.62;
+        gain[bin] = previousGain[bin] + (target - previousGain[bin]) * blend;
+      }
+      previousGain[bin] = gain[bin];
+    }
+    firstFrame = false;
+
+    for (let channel = 0; channel < channels.length; channel++) {
+      for (let bin = 0; bin < binCount; bin++) {
+        real[channel][bin] *= gain[bin];
+        imaginary[channel][bin] *= gain[bin];
+        if (bin > 0 && bin < fftSize / 2) {
+          real[channel][fftSize - bin] *= gain[bin];
+          imaginary[channel][fftSize - bin] *= gain[bin];
+        }
+      }
+      fft(real[channel], imaginary[channel], true);
+      for (let offset = 0; offset < fftSize; offset++) {
+        const index = start + offset;
+        if (index < 0 || index >= length) continue;
+        const windowed = real[channel][offset] * window[offset];
+        output[channel][index] += windowed;
+        if (channel === 0) normalization[index] += window[offset] * window[offset];
+      }
+    }
+    for (let bin = 0; bin < binCount; bin++) outputPower += gain[bin] * gain[bin];
+  }
+
+  for (let channel = 0; channel < channels.length; channel++) {
+    for (let index = 0; index < length; index++) {
+      channels[channel][index] = output[channel][index] / Math.max(EPSILON, normalization[index]);
+    }
+  }
+
+  // Report mask attenuation, not the song's level change. It remains useful
+  // even when loud musical bins dominate total signal power.
+  const averageGainPower = outputPower / Math.max(1, inputPower);
+  const noiseReductionDb = clamp(-10 * Math.log10(Math.max(EPSILON, averageGainPower)), 0, 99);
+  return {
+    noiseReductionDb,
+    noiseFloorDb: profile.floorDb,
+    noiseFrames: profile.frameCount
+  };
+}
+
 function median(values) {
   if (!values.length) return 0;
   values.sort((a, b) => a - b);
@@ -424,11 +686,23 @@ export function createRestoredInputBuffer(context, inputBuffer, settings) {
     channels.push(output);
   }
 
-  const report = { edgeSamples: 0, impulseSamples: 0, crackleSamples: 0 };
+  const report = {
+    edgeSamples: 0,
+    impulseSamples: 0,
+    crackleSamples: 0,
+    noiseReductionDb: 0,
+    noiseFloorDb: -Infinity,
+    noiseFrames: 0
+  };
   if (settings.repairEdgeArtifacts) report.edgeSamples = repairEdgeArtifacts(channels, inputBuffer.sampleRate);
   if (settings.repairVocalCrackle) {
     report.impulseSamples = repairClicksAndPops(channels, inputBuffer.sampleRate);
     report.crackleSamples = report.impulseSamples;
+  }
+  if (settings.noiseReduction) {
+    Object.assign(report, reduceBroadbandNoise(channels, inputBuffer.sampleRate, {
+      amount: settings.noiseReductionAmount
+    }));
   }
   return { buffer: restored, report };
 }

@@ -67,6 +67,8 @@ function saveSettingsToStorage() {
       repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
       repairPrematureEnding: dom.repairPrematureEnding.checked,
       repairVocalCrackle: dom.repairVocalCrackle.checked,
+      noiseReduction: dom.noiseReduction.checked,
+      noiseReductionAmount: parseInt(dom.noiseReductionAmount.value),
       deliveryProfile: dom.deliveryProfile.value,
       batchNormalizationMode: dom.batchNormalizationMode.value,
       sampleRate: parseInt(dom.sampleRate.value),
@@ -99,6 +101,7 @@ function loadSettingsFromStorage() {
     if (s.repairEdgeArtifacts !== undefined) dom.repairEdgeArtifacts.checked = s.repairEdgeArtifacts;
     if (s.repairPrematureEnding !== undefined) dom.repairPrematureEnding.checked = s.repairPrematureEnding;
     if (s.repairVocalCrackle !== undefined) dom.repairVocalCrackle.checked = s.repairVocalCrackle;
+    if (s.noiseReduction !== undefined) dom.noiseReduction.checked = s.noiseReduction;
 
     // Sliders / selects
     if (s.truePeakCeiling !== undefined) dom.truePeakSlider.value = s.truePeakCeiling;
@@ -113,6 +116,7 @@ function loadSettingsFromStorage() {
     if (s.deEsserRange !== undefined) dom.deEsserRange.value = s.deEsserRange;
     if (s.deEsserAttack !== undefined) dom.deEsserAttack.value = s.deEsserAttack;
     if (s.deEsserRelease !== undefined) dom.deEsserRelease.value = s.deEsserRelease;
+    if (s.noiseReductionAmount !== undefined) dom.noiseReductionAmount.value = s.noiseReductionAmount;
     if (s.deliveryProfile && DELIVERY_PROFILES[s.deliveryProfile]) dom.deliveryProfile.value = s.deliveryProfile;
     if (['track', 'album'].includes(s.batchNormalizationMode)) dom.batchNormalizationMode.value = s.batchNormalizationMode;
     if (s.sampleRate !== undefined) dom.sampleRate.value = s.sampleRate;
@@ -170,6 +174,8 @@ function captureState() {
     repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
     repairPrematureEnding: dom.repairPrematureEnding.checked,
     repairVocalCrackle: dom.repairVocalCrackle.checked,
+    noiseReduction: dom.noiseReduction.checked,
+    noiseReductionAmount: parseInt(dom.noiseReductionAmount.value),
     eqBands: masterEqBands.map(band => ({ ...band }))
   };
 }
@@ -206,6 +212,8 @@ function applyState(s) {
   dom.repairEdgeArtifacts.checked = s.repairEdgeArtifacts;
   dom.repairPrematureEnding.checked = s.repairPrematureEnding;
   dom.repairVocalCrackle.checked = s.repairVocalCrackle;
+  dom.noiseReduction.checked = s.noiseReduction;
+  dom.noiseReductionAmount.value = s.noiseReductionAmount;
   masterEqBands = sanitizeEqBands(s.eqBands, s);
 
   // Refresh display values
@@ -375,6 +383,9 @@ const dom = {
   repairEdgeArtifacts: document.getElementById('repairEdgeArtifacts'),
   repairPrematureEnding: document.getElementById('repairPrematureEnding'),
   repairVocalCrackle: document.getElementById('repairVocalCrackle'),
+  noiseReduction: document.getElementById('noiseReduction'),
+  noiseReductionAmount: document.getElementById('noiseReductionAmount'),
+  noiseReductionAmountValue: document.getElementById('noiseReductionAmountValue'),
   restorationStatus: document.getElementById('restorationStatus'),
   deliveryProfile: document.getElementById('deliveryProfile'),
   batchNormalizationMode: document.getElementById('batchNormalizationMode'),
@@ -499,6 +510,8 @@ function collectMasterSettings({ forExport = false } = {}) {
     repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
     repairPrematureEnding: dom.repairPrematureEnding.checked,
     repairVocalCrackle: dom.repairVocalCrackle.checked,
+    noiseReduction: dom.noiseReduction.checked,
+    noiseReductionAmount: parseInt(dom.noiseReductionAmount.value),
     deliveryProfile: dom.deliveryProfile.value,
     batchNormalizationMode: dom.batchNormalizationMode.value,
     sampleRate: parseInt(dom.sampleRate.value),
@@ -514,6 +527,7 @@ function updateAdaptiveDynamicsDisplays() {
   dom.deEsserRangeValue.textContent = `${parseFloat(dom.deEsserRange.value).toFixed(1)} dB`;
   dom.deEsserAttackValue.textContent = `${parseFloat(dom.deEsserAttack.value).toFixed(0)} ms`;
   dom.deEsserReleaseValue.textContent = `${parseFloat(dom.deEsserRelease.value).toFixed(0)} ms`;
+  dom.noiseReductionAmountValue.textContent = `${parseInt(dom.noiseReductionAmount.value)}%`;
 }
 
 function updateStereoDisplays() {
@@ -740,6 +754,8 @@ function createDefaultStemSettings() {
     repairEdgeArtifacts: false,
     repairPrematureEnding: false,
     repairVocalCrackle: false,
+    noiseReduction: false,
+    noiseReductionAmount: 50,
     eqBands: cloneDefaultEqBands(),
     eqLow: 0,
     eqLowMid: 0,
@@ -966,7 +982,8 @@ async function renderStemSongMix(song, sampleRate = null, allowAudition = true, 
   for (const stem of song.stems) {
     const source = context.createBufferSource();
     const needsRestoration = stem.settings.repairEdgeArtifacts ||
-      stem.settings.repairPrematureEnding || stem.settings.repairVocalCrackle;
+      stem.settings.repairPrematureEnding || stem.settings.repairVocalCrackle ||
+      stem.settings.noiseReduction;
     if (needsRestoration) {
       const restored = createRestoredInputBuffer(context, stem.buffer, stem.settings);
       if (stem.settings.repairPrematureEnding) {
@@ -1176,7 +1193,9 @@ function getRestorationPreviewSettings() {
   return {
     repairEdgeArtifacts: dom.repairEdgeArtifacts.checked,
     repairPrematureEnding: dom.repairPrematureEnding.checked,
-    repairVocalCrackle: dom.repairVocalCrackle.checked
+    repairVocalCrackle: dom.repairVocalCrackle.checked,
+    noiseReduction: dom.noiseReduction.checked,
+    noiseReductionAmount: parseInt(dom.noiseReductionAmount.value)
   };
 }
 
@@ -1203,11 +1222,17 @@ function updateRestorationStatus(settings, report) {
       ? `clicks/pops: ${impulseSamples} channel samples repaired`
       : 'clicks/pops: no sparse impulses detected');
   }
+  if (settings.noiseReduction) {
+    messages.push(report.noiseFrames
+      ? `denoise: ${report.noiseReductionDb.toFixed(1)} dB avg · floor ${report.noiseFloorDb.toFixed(0)} dBFS`
+      : 'denoise: no usable noise profile');
+  }
 
   dom.restorationStatus.textContent = messages.length ? `Preview: ${messages.join(' · ')}` : 'Preview: restoration off';
   dom.restorationStatus.classList.toggle(
     'detected',
-    Boolean(report.edgeSamples || report.impulseSamples || report.crackleSamples || report.endingRepaired)
+    Boolean(report.edgeSamples || report.impulseSamples || report.crackleSamples ||
+      report.endingRepaired || report.noiseFrames)
   );
 }
 
@@ -1219,7 +1244,8 @@ function updateRestorationPreview() {
   }
 
   const settings = getRestorationPreviewSettings();
-  if (!settings.repairEdgeArtifacts && !settings.repairPrematureEnding && !settings.repairVocalCrackle) {
+  if (!settings.repairEdgeArtifacts && !settings.repairPrematureEnding &&
+      !settings.repairVocalCrackle && !settings.noiseReduction) {
     state.file.restorationPreviewBuffer = null;
     state.file.restorationReport = { edgeSamples: 0, impulseSamples: 0, crackleSamples: 0, endingRepaired: false };
     updateRestorationStatus(settings, state.file.restorationReport);
@@ -1295,7 +1321,8 @@ async function updateLiveMasterRestorationPreview() {
     return;
   }
   const request = ++state.audio.restorationPreviewRequest;
-  if (!settings.repairEdgeArtifacts && !settings.repairPrematureEnding && !settings.repairVocalCrackle) {
+  if (!settings.repairEdgeArtifacts && !settings.repairPrematureEnding &&
+      !settings.repairVocalCrackle && !settings.noiseReduction) {
     removeLiveMasterRestoration();
     updateRestorationStatus(settings, { edgeSamples: 0, impulseSamples: 0, crackleSamples: 0, endingRepaired: false });
     return;
@@ -1427,7 +1454,7 @@ function getStemLivePlaybackBuffer(context, stem) {
   // for an artifact. Only explicit per-stem restoration belongs in this path.
   const settings = stem.settings;
   const needsRestoration = settings.repairEdgeArtifacts ||
-    settings.repairPrematureEnding || settings.repairVocalCrackle;
+    settings.repairPrematureEnding || settings.repairVocalCrackle || settings.noiseReduction;
   if (!needsRestoration) return stem.buffer;
 
   const restored = createRestoredInputBuffer(context, stem.buffer, settings);
@@ -2261,6 +2288,7 @@ function updateChecklist() {
 
 // ─── Settings Change Handlers ───────────────────────────────────────────────
 const restorationControls = [
+  dom.noiseReduction,
   dom.repairEdgeArtifacts,
   dom.repairPrematureEnding,
   dom.repairVocalCrackle
@@ -2268,7 +2296,7 @@ const restorationControls = [
 
 [dom.normalizeLoudness, dom.truePeakLimit, dom.cleanLowEnd, dom.glueCompression,
  dom.centerBass, dom.monoMonitor, dom.cutMud, dom.addAir, dom.tameHarsh, dom.dynamicEq, dom.deEsser,
- dom.deEsserAudition, dom.repairEdgeArtifacts, dom.repairPrematureEnding,
+ dom.deEsserAudition, dom.noiseReduction, dom.repairEdgeArtifacts, dom.repairPrematureEnding,
  dom.repairVocalCrackle].forEach(el => {
   el.addEventListener('change', async () => {
     pushUndo();
@@ -2345,6 +2373,22 @@ if (dom.inputGain) {
     updateAudioChain();
     saveSettingsToStorage();
   });
+});
+
+dom.noiseReductionAmount.addEventListener('mousedown', () => pushUndo());
+dom.noiseReductionAmount.addEventListener('input', () => {
+  dom.noiseReductionAmountValue.textContent = `${parseInt(dom.noiseReductionAmount.value)}%`;
+  saveSettingsToStorage();
+});
+dom.noiseReductionAmount.addEventListener('change', () => {
+  if (!dom.noiseReduction.checked) return;
+  if (state.file.stemSong && state.playback.isPlaying) {
+    void updateLiveMasterRestorationPreview();
+  } else {
+    stopAudio();
+    state.playback.pauseTime = 0;
+    updateRestorationPreview();
+  }
 });
 
 if (dom.targetLufs) {
@@ -2852,9 +2896,13 @@ function renderStemEditor() {
     </div>
     <div class="stem-editor-section-title">Stem Restoration</div>
     <div class="stem-editor-toggles">
+      ${toggle('noiseReduction', 'High-Quality Denoise', 'Learn and reduce steady hiss, hum, fan, or room noise on this stem.')}
       ${toggle('repairEdgeArtifacts', 'Repair Edges', 'Repair detected boundary clicks or bursts on this stem.')}
       ${toggle('repairPrematureEnding', 'Repair Cutoff', 'Apply a clean release only if this stem ends abruptly.')}
       ${toggle('repairVocalCrackle', 'Repair Clicks & Pops', 'Repair sparse detected impulses without changing sustained texture.')}
+    </div>
+    <div class="stem-editor-dynamics">
+      ${slider('noiseReductionAmount', 'Denoise Amount', 0, 100, 1, '%')}
     </div>
     <p class="stem-editor-note">Loudness normalization, true-peak limiting, and export format remain at song level.</p>
   `;
@@ -2866,7 +2914,7 @@ function renderStemEditor() {
       stem.settings[key] = input.type === 'checkbox' ? input.checked : parseFloat(input.value);
       const output = input.parentElement.querySelector('output');
       if (output) {
-        const suffix = ['width', 'dynamicEqAmount', 'compressorMix'].includes(key) ? '%'
+        const suffix = ['width', 'dynamicEqAmount', 'noiseReductionAmount', 'compressorMix'].includes(key) ? '%'
           : key === 'pan' ? ''
             : key === 'compressorRatio' ? ':1'
               : ['compressorAttack', 'compressorRelease', 'deEsserAttack', 'deEsserRelease'].includes(key) ? ' ms'

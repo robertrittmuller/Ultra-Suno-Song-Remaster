@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { repairClicksAndPops } from '../src/audioRestoration.js';
+import { reduceBroadbandNoise, repairClicksAndPops } from '../src/audioRestoration.js';
 import { sineWave } from './audioTestUtils.js';
 
 const SAMPLE_RATE = 48000;
@@ -109,4 +109,72 @@ test('a sparse sequence of alternating crackles is removed without a global deno
   for (const location of locations) {
     assert.ok(Math.abs(damaged[location] - clean[location]) < 0.003);
   }
+});
+
+function rms(samples, start, end) {
+  let sum = 0;
+  for (let index = start; index < end; index++) sum += samples[index] * samples[index];
+  return Math.sqrt(sum / Math.max(1, end - start));
+}
+
+function sineAmplitude(samples, frequency, start, end) {
+  let sine = 0;
+  let cosine = 0;
+  for (let index = start; index < end; index++) {
+    const phase = 2 * Math.PI * frequency * index / SAMPLE_RATE;
+    sine += samples[index] * Math.sin(phase);
+    cosine += samples[index] * Math.cos(phase);
+  }
+  return 2 * Math.hypot(sine, cosine) / Math.max(1, end - start);
+}
+
+test('spectral denoise lowers a learned stationary noise floor while preserving a tone', () => {
+  const length = Math.round(SAMPLE_RATE * 1.2);
+  const noise = seededNoise(length, 987654321);
+  const channel = new Float32Array(length);
+  const toneStart = Math.round(SAMPLE_RATE * 0.3);
+  for (let index = 0; index < length; index++) {
+    channel[index] = noise[index] * 0.018;
+    if (index >= toneStart) channel[index] += 0.2 * Math.sin(2 * Math.PI * 440 * index / SAMPLE_RATE);
+  }
+  const beforeNoise = rms(channel, 3000, toneStart - 3000);
+  const beforeTone = sineAmplitude(channel, 440, toneStart + 3000, length - 3000);
+
+  const report = reduceBroadbandNoise([channel], SAMPLE_RATE, { amount: 65 });
+  const afterNoise = rms(channel, 3000, toneStart - 3000);
+  const afterTone = sineAmplitude(channel, 440, toneStart + 3000, length - 3000);
+
+  assert.ok(report.noiseFrames >= 4);
+  assert.ok(afterNoise < beforeNoise * 0.55, `noise ratio was ${afterNoise / beforeNoise}`);
+  assert.ok(afterTone > beforeTone * 0.94, `tone ratio was ${afterTone / beforeTone}`);
+});
+
+test('spectral denoise uses one linked mask for identical stereo channels', () => {
+  const left = seededNoise(Math.round(SAMPLE_RATE * 0.25), 2468);
+  for (let index = 0; index < left.length; index++) left[index] *= 0.02;
+  const right = new Float32Array(left);
+
+  reduceBroadbandNoise([left, right], SAMPLE_RATE, { amount: 50 });
+
+  assert.deepEqual(left, right);
+});
+
+test('spectral denoise refuses to learn a constant pitched source as noise', () => {
+  const channel = sineWave(SAMPLE_RATE, 0.25, 440, 0.2);
+  const original = new Float32Array(channel);
+
+  const report = reduceBroadbandNoise([channel], SAMPLE_RATE, { amount: 80 });
+
+  assert.equal(report.noiseFrames, 0);
+  assert.deepEqual(channel, original);
+});
+
+test('zero denoise amount is a sample-identical bypass', () => {
+  const channel = seededNoise(Math.round(SAMPLE_RATE * 0.2), 13579);
+  const original = new Float32Array(channel);
+
+  const report = reduceBroadbandNoise([channel], SAMPLE_RATE, { amount: 0 });
+
+  assert.equal(report.noiseReductionDb, 0);
+  assert.deepEqual(channel, original);
 });
