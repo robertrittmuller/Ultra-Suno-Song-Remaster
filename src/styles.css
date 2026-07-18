@@ -1823,6 +1823,7 @@ html[data-platform="darwin"] .window-controls {
 .master-scope-banner {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 9px;
   padding: 5px 9px;
   border: 1px solid rgba(168, 85, 247, 0.18);
@@ -1845,7 +1846,8 @@ html[data-platform="darwin"] .window-controls {
 }
 
 .btn-reset-settings {
-  margin-left: auto;
+  flex-basis: 100%;
+  margin-top: 2px;
   padding: 4px 8px;
   white-space: nowrap;
 }
