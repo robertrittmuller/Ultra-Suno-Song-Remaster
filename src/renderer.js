@@ -1,4 +1,4 @@
-import { AUDIO_CONSTANTS, validateSettings } from './audioConstants.js';
+import { AUDIO_CONSTANTS, DEFAULT_SETTINGS, validateSettings } from './audioConstants.js';
 import { measureLUFS, calculateNormalizationGain } from './lufs.js';
 import { encodeWAV } from './wavEncoder.js';
 import { createRestoredInputBuffer, repairPrematureEnding } from './audioRestoration.js';
@@ -53,6 +53,7 @@ function saveSettingsToStorage() {
       cleanLowEnd: dom.cleanLowEnd.checked,
       glueCompression: dom.glueCompression.checked,
       centerBass: dom.centerBass.checked,
+      monoMonitor: dom.monoMonitor.checked,
       cutMud: dom.cutMud.checked,
       addAir: dom.addAir.checked,
       tameHarsh: dom.tameHarsh.checked,
@@ -92,6 +93,7 @@ function loadSettingsFromStorage() {
     if (s.cleanLowEnd !== undefined) dom.cleanLowEnd.checked = s.cleanLowEnd;
     if (s.glueCompression !== undefined) dom.glueCompression.checked = s.glueCompression;
     if (s.centerBass !== undefined) dom.centerBass.checked = s.centerBass;
+    if (s.monoMonitor !== undefined) dom.monoMonitor.checked = s.monoMonitor;
     if (s.cutMud !== undefined) dom.cutMud.checked = s.cutMud;
     if (s.addAir !== undefined) dom.addAir.checked = s.addAir;
     if (s.tameHarsh !== undefined) dom.tameHarsh.checked = s.tameHarsh;
@@ -160,6 +162,7 @@ function captureState() {
     cleanLowEnd: dom.cleanLowEnd.checked,
     glueCompression: dom.glueCompression.checked,
     centerBass: dom.centerBass.checked,
+    monoMonitor: dom.monoMonitor.checked,
     cutMud: dom.cutMud.checked,
     addAir: dom.addAir.checked,
     tameHarsh: dom.tameHarsh.checked,
@@ -176,7 +179,12 @@ function captureState() {
     repairVocalCrackle: dom.repairVocalCrackle.checked,
     noiseReduction: dom.noiseReduction.checked,
     noiseReductionAmount: parseInt(dom.noiseReductionAmount.value),
-    eqBands: masterEqBands.map(band => ({ ...band }))
+    deliveryProfile: dom.deliveryProfile.value,
+    batchNormalizationMode: dom.batchNormalizationMode.value,
+    sampleRate: parseInt(dom.sampleRate.value),
+    bitDepth: parseInt(dom.bitDepth.value),
+    eqBands: masterEqBands.map(band => ({ ...band })),
+    activePreset: document.querySelector('.preset-btn.active')?.dataset.preset || 'flat'
   };
 }
 
@@ -198,6 +206,7 @@ function applyState(s) {
   dom.cleanLowEnd.checked = s.cleanLowEnd;
   dom.glueCompression.checked = s.glueCompression;
   dom.centerBass.checked = s.centerBass;
+  dom.monoMonitor.checked = s.monoMonitor;
   dom.cutMud.checked = s.cutMud;
   dom.addAir.checked = s.addAir;
   dom.tameHarsh.checked = s.tameHarsh;
@@ -214,7 +223,14 @@ function applyState(s) {
   dom.repairVocalCrackle.checked = s.repairVocalCrackle;
   dom.noiseReduction.checked = s.noiseReduction;
   dom.noiseReductionAmount.value = s.noiseReductionAmount;
+  dom.deliveryProfile.value = s.deliveryProfile;
+  dom.batchNormalizationMode.value = s.batchNormalizationMode;
+  dom.sampleRate.value = s.sampleRate;
+  dom.bitDepth.value = s.bitDepth;
   masterEqBands = sanitizeEqBands(s.eqBands, s);
+  document.querySelectorAll('.preset-btn').forEach(button => {
+    button.classList.toggle('active', button.dataset.preset === (s.activePreset || 'flat'));
+  });
 
   // Refresh display values
   if (dom.ceilingValue) dom.ceilingValue.textContent = `${s.truePeakCeiling.toFixed(1)} dB`;
@@ -346,6 +362,7 @@ const dom = {
   ceilingFill: document.getElementById('ceilingFill'),
 
   // Settings
+  resetSettingsBtn: document.getElementById('resetSettingsBtn'),
   normalizeLoudness: document.getElementById('normalizeLoudness'),
   truePeakLimit: document.getElementById('truePeakLimit'),
   truePeakSlider: document.getElementById('truePeakCeiling'),
@@ -2293,6 +2310,24 @@ const restorationControls = [
   dom.repairPrematureEnding,
   dom.repairVocalCrackle
 ];
+
+dom.resetSettingsBtn.addEventListener('click', async () => {
+  const confirmed = window.confirm(
+    'Reset all Song Master settings to their defaults? This also replaces the saved settings. Stem processing and the app theme are unchanged.'
+  );
+  if (!confirmed) return;
+
+  const previousGlueCompression = dom.glueCompression.checked;
+  pushUndo();
+  stopAudio();
+  state.playback.pauseTime = 0;
+  applyState({ ...DEFAULT_SETTINGS, eqBands: cloneDefaultEqBands(), activePreset: 'flat' });
+
+  // The glue-compressor bypass is assembled when the preview graph is built.
+  // Rebuild it if reset changes that mode so the preview stays latency-free.
+  if (previousGlueCompression && state.file.buffer) await createAudioChain();
+  showFileStatus('✓ Song Master settings reset to defaults.');
+});
 
 [dom.normalizeLoudness, dom.truePeakLimit, dom.cleanLowEnd, dom.glueCompression,
  dom.centerBass, dom.monoMonitor, dom.cutMud, dom.addAir, dom.tameHarsh, dom.dynamicEq, dom.deEsser,

@@ -1844,6 +1844,12 @@ html[data-platform="darwin"] .window-controls {
   font-size: 9px;
 }
 
+.btn-reset-settings {
+  margin-left: auto;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
 .batch-song-group {
   display: flex;
   flex-direction: column;
