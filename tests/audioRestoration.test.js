@@ -92,6 +92,23 @@ test('adjacent samples in a short pop are reconstructed as one bounded gap', () 
   }
 });
 
+test('repair preserves high-frequency waveform instead of replacing a pop with a new tick', () => {
+  const clean = sineWave(SAMPLE_RATE, 0.5, 10000, 0.18, 1.2);
+  const damaged = new Float32Array(clean);
+  const click = 12000;
+  damaged[click] += 0.45;
+
+  const repaired = repairClicksAndPops([damaged], SAMPLE_RATE);
+
+  assert.ok(repaired >= 1, 'expected the injected pop to be detected');
+  for (let index = click - 2; index <= click + 2; index++) {
+    assert.ok(
+      Math.abs(damaged[index] - clean[index]) < 0.003,
+      `replacement waveform error was ${Math.abs(damaged[index] - clean[index])} at ${index - click}`
+    );
+  }
+});
+
 test('a sparse sequence of alternating crackles is removed without a global denoise pass', () => {
   const clean = new Float32Array(SAMPLE_RATE * 2);
   for (let index = 0; index < clean.length; index++) {

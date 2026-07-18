@@ -324,10 +324,10 @@ function solveLinearSystem(matrix, vector) {
 // A short autoregressive model describes pitched and noisy musical material
 // much more accurately than raw waveform curvature. A small ridge term keeps
 // near-periodic frames numerically stable.
-function fitPredictionCoefficients(channel, start, end, order) {
+function fitPredictionCoefficients(channel, start, end, order, stride = 2) {
   const correlations = new Float64Array(order + 1);
   let count = 0;
-  for (let index = Math.max(start + order, order); index < end; index += 2) {
+  for (let index = Math.max(start + order, order); index < end; index += stride) {
     for (let lag = 0; lag <= order; lag++) {
       correlations[lag] += channel[index] * channel[index - lag];
     }
@@ -454,7 +454,99 @@ function bridgeOneSampleGaps(marks) {
   }
 }
 
-function repairChannelRuns(channel, marks, maxRunLength) {
+function predictRepairRun(channel, runStart, runEnd, sampleRate) {
+  const runLength = runEnd - runStart + 1;
+  const order = 8;
+  const contextLength = Math.max(96, Math.round(sampleRate * 0.006));
+  const leftStart = Math.max(0, runStart - contextLength);
+  const rightEnd = Math.min(channel.length, runEnd + 1 + contextLength);
+  const forwardCoefficients = fitPredictionCoefficients(channel, leftStart, runStart, order, 1);
+  const backwardCoefficients = fitPredictionCoefficients(channel, runEnd + 1, rightEnd, order, 1);
+  if (!forwardCoefficients || !backwardCoefficients) return null;
+
+  const forward = new Float64Array(runLength);
+  const backward = new Float64Array(runLength);
+  for (let offset = 0; offset < runLength; offset++) {
+    let prediction = 0;
+    const index = runStart + offset;
+    for (let lag = 0; lag < order; lag++) {
+      const source = index - lag - 1;
+      prediction += forwardCoefficients[lag] * (
+        source >= runStart ? forward[source - runStart] : channel[source]
+      );
+    }
+    forward[offset] = prediction;
+  }
+  for (let offset = runLength - 1; offset >= 0; offset--) {
+    let prediction = 0;
+    const index = runStart + offset;
+    for (let lag = 0; lag < order; lag++) {
+      const source = index + lag + 1;
+      prediction += backwardCoefficients[lag] * (
+        source <= runEnd ? backward[source - runStart] : channel[source]
+      );
+    }
+    backward[offset] = prediction;
+  }
+
+  // Blend independent predictions from both clean sides. Limit the result to
+  // the nearby clean envelope so an unstable predictor cannot invent a spike.
+  let minimum = Infinity;
+  let maximum = -Infinity;
+  for (let index = leftStart; index < runStart; index++) {
+    minimum = Math.min(minimum, channel[index]);
+    maximum = Math.max(maximum, channel[index]);
+  }
+  for (let index = runEnd + 1; index < rightEnd; index++) {
+    minimum = Math.min(minimum, channel[index]);
+    maximum = Math.max(maximum, channel[index]);
+  }
+  const replacement = new Float64Array(runLength);
+  for (let offset = 0; offset < runLength; offset++) {
+    const blend = (offset + 1) / (runLength + 1);
+    replacement[offset] = clamp(
+      forward[offset] * (1 - blend) + backward[offset] * blend,
+      minimum,
+      maximum
+    );
+  }
+  return replacement;
+}
+
+function repairCurvature(channel, replacement, runStart, runEnd) {
+  const valueAt = index => (
+    index >= runStart && index <= runEnd
+      ? replacement[index - runStart]
+      : channel[index]
+  );
+  let peak = 0;
+  let total = 0;
+  for (let index = Math.max(1, runStart - 1); index <= Math.min(channel.length - 2, runEnd + 1); index++) {
+    const curvature = Math.abs(valueAt(index) - (valueAt(index - 1) + valueAt(index + 1)) * 0.5);
+    peak = Math.max(peak, curvature);
+    total += curvature;
+  }
+  return { peak, total };
+}
+
+function localCleanCurvatureStats(channel, runStart, runEnd, sampleRate) {
+  const radius = Math.max(64, Math.round(sampleRate * 0.003));
+  const curvatures = [];
+  for (let index = Math.max(1, runStart - radius); index < runStart - 1; index++) {
+    curvatures.push(Math.abs(channel[index] - (channel[index - 1] + channel[index + 1]) * 0.5));
+  }
+  for (let index = runEnd + 2; index <= Math.min(channel.length - 2, runEnd + radius); index++) {
+    curvatures.push(Math.abs(channel[index] - (channel[index - 1] + channel[index + 1]) * 0.5));
+  }
+  const cleanCurvature = quantile(curvatures, 0.95);
+  const localRms = Math.max(EPSILON, channelRms(channel, runStart - radius, runEnd + radius + 1));
+  return {
+    limit: Math.max(0.0015, cleanCurvature * 2.5),
+    isHighFrequency: cleanCurvature / localRms > 0.02
+  };
+}
+
+function repairChannelRuns(channel, marks, maxRunLength, sampleRate) {
   let repaired = 0;
   for (let index = 1; index < marks.length - 1; index++) {
     if (!marks[index]) continue;
@@ -467,11 +559,39 @@ function repairChannelRuns(channel, marks, maxRunLength) {
     const left = channel[runStart - 1];
     const right = channel[runEnd + 1];
     const distance = runLength + 1;
-    // Linear interpolation is intentionally bounded by its clean endpoints.
-    // For a sub-millisecond gap it is transparent, and unlike an unconstrained
-    // cubic it cannot overshoot and manufacture a second pop.
+    const linear = new Float64Array(runLength);
     for (let offset = 1; offset <= runLength; offset++) {
-      channel[runStart + offset - 1] = left + (right - left) * (offset / distance);
+      linear[offset - 1] = left + (right - left) * (offset / distance);
+    }
+
+    const original = Float64Array.from(channel.subarray(runStart, runEnd + 1));
+    const predicted = predictRepairRun(channel, runStart, runEnd, sampleRate);
+    const originalScore = repairCurvature(channel, original, runStart, runEnd);
+    const cleanStats = localCleanCurvatureStats(channel, runStart, runEnd, sampleRate);
+    const replacements = cleanStats.isHighFrequency ? [predicted, linear] : [linear, predicted];
+    const candidates = replacements.filter(Boolean).map(replacement => ({
+      replacement,
+      score: repairCurvature(channel, replacement, runStart, runEnd)
+    }));
+    // Prefer waveform prediction on high-frequency material, where flattening
+    // a legitimate cycle turns a nominally "smooth" patch into an audible
+    // tick. Linear interpolation remains more accurate for slowly varying audio.
+    const best = candidates.find(candidate => (
+      candidate.score.peak < originalScore.peak * 0.75 &&
+      candidate.score.peak <= cleanStats.limit
+    ));
+
+    // Detection and reconstruction are deliberately separate gates. A run is
+    // committed only if its replacement lowers the anomaly and joins with no
+    // more curvature than nearby clean audio. Otherwise leaving the candidate
+    // alone is safer than replacing it with a newly audible tick.
+    if (
+      !best
+    ) {
+      continue;
+    }
+    for (let offset = 0; offset < runLength; offset++) {
+      channel[runStart + offset] = best.replacement[offset];
     }
     repaired += runLength;
   }
@@ -630,7 +750,7 @@ export function repairClicksAndPops(channels, sampleRate) {
   for (const channel of channels) {
     const marks = markPredictiveImpulses(channel, sampleRate);
     bridgeOneSampleGaps(marks);
-    repaired += repairChannelRuns(channel, marks, maxRunLength);
+    repaired += repairChannelRuns(channel, marks, maxRunLength, sampleRate);
   }
   return repaired;
 }
