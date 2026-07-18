@@ -25,6 +25,15 @@ class TruePeakLimiterProcessor extends AudioWorkletProcessor {
     this.ringLength = this.lookaheadFrames + 256;
     this.rings = [];
     this.histories = [];
+    this.port.onmessage = event => {
+      if (event.data?.type === 'reset') this.reset();
+    };
+    this.reset();
+  }
+
+  reset() {
+    for (const ring of this.rings) ring.fill(0);
+    for (const history of this.histories) history.fill(0);
     this.writeIndex = 0;
     this.framesSeen = 0;
     this.envelope = 1;

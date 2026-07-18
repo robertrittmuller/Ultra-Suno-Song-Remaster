@@ -5,11 +5,13 @@ import { createRestoredInputBuffer, repairPrematureEnding } from './audioRestora
 import {
   MONO_BASS_FREQUENCY,
   GLUE_COMPRESSOR_LATENCY_SECONDS,
+  REALTIME_LIMITER_LATENCY_SECONDS,
   configureStereoImaging,
   configureMasteringNodes,
   connectMasteringGraph,
   createMasteringNodes,
   createRealtimeLimiterNode,
+  resetRealtimeLimiterNode,
   setLimiterParameters
 } from './masteringEngine.js';
 import { finalizeMaster } from './truePeakLimiter.js';
@@ -33,9 +35,20 @@ import {
 import { applyDeliveryProfile, DELIVERY_PROFILES, resolveOutputSampleRate } from './deliveryProfiles.js';
 import { calculateAlbumNormalizationGain } from './albumNormalization.js';
 import { calculateAverageSpectrum } from './spectrumAnalysis.js';
+import {
+  armPlaybackGuard,
+  createPlaybackGuardNode,
+  silencePlaybackGuard
+} from './playbackGuard.js';
 
 // ─── Settings Persistence ───────────────────────────────────────────────────
 const STORAGE_KEY = 'ai-mastering-settings';
+// BufferSourceNodes start on an arbitrary sample, while the persistent preview
+// graph can still contain a few frames from a previous play. Leave one short
+// audio interval for that graph to settle, then fade in the shared output so
+// neither transition reaches the speakers as a discontinuity.
+const PLAYBACK_START_DELAY_SECONDS = 0.01;
+const PLAYBACK_OUTPUT_FADE_SECONDS = 0.02;
 const masteringReports = new WeakMap();
 let masterEqBands = cloneDefaultEqBands();
 
@@ -267,6 +280,7 @@ const state = {
     buffer: null,
     stemSong: null,
     restorationPreviewBuffer: null,
+    restorationDeltaBuffer: null,
     restorationReport: null,
     duration: 0,
     lufs: null,
@@ -287,11 +301,15 @@ const state = {
     analyserLeft: null,
     analyserRight: null,
     splitter: null,
+    playbackGain: null,
     nodes: {}
   },
   playback: {
     isPlaying: false,
     startTime: 0,
+    outputStartTime: 0,
+    startOffset: 0,
+    scheduledStartTime: 0,
     pauseTime: 0,
     isSeeking: false,
     seekInterval: null
@@ -485,6 +503,18 @@ function initAudioContext() {
   return state.audio.context;
 }
 
+// Opening an AudioContext's output device can itself produce a small hardware
+// transient. Resume it during an existing file-selection/drop gesture, while
+// the preview output is still silent, instead of doing so when Play is pressed.
+function warmPreviewAudio() {
+  const context = initAudioContext();
+  if (context.state === 'suspended') {
+    void context.resume().catch(error => {
+      console.warn('Could not prewarm preview audio output.', error);
+    });
+  }
+}
+
 function readMasterDynamicsSettings() {
   return {
     dynamicEq: dom.dynamicEq.checked,
@@ -561,7 +591,7 @@ async function createAudioChain() {
   // Analysers — use smaller FFT for level meters (faster)
   state.audio.analyser = ctx.createAnalyser();
   state.audio.analyser.fftSize = 2048; // keep 2048 for spectrogram
-  state.audio.analyser.smoothingTimeConstant = 0.3;
+  state.audio.analyser.smoothingTimeConstant = 0.1;
 
   state.audio.splitter = ctx.createChannelSplitter(2);
   state.audio.analyserLeft = ctx.createAnalyser();
@@ -573,6 +603,15 @@ async function createAudioChain() {
   state.audio.analyserRight.smoothingTimeConstant = 0;
   state.audio.splitter.connect(state.audio.analyserLeft, 0);
   state.audio.splitter.connect(state.audio.analyserRight, 1);
+
+  // All preview variants (processed, original, stems, and reference) share a
+  // final gain stage. Keeping the ramp after the processing graph also masks
+  // residual look-ahead frames from the real-time limiter on a rapid restart.
+  state.audio.playbackGain = await createPlaybackGuardNode(ctx);
+  if (state.audio.playbackGain.gain) state.audio.playbackGain.gain.value = 0;
+  state.audio.playbackGain.connect(state.audio.analyser);
+  state.audio.playbackGain.connect(state.audio.splitter);
+  state.audio.playbackGain.connect(ctx.destination);
 
   await Promise.all([
     ensureStudioDynamicsWorklet(ctx),
@@ -660,9 +699,46 @@ function updateAudioChain() {
 }
 
 function connectPreviewOutput(source) {
-  source.connect(state.audio.analyser);
-  source.connect(state.audio.splitter);
-  source.connect(state.audio.context.destination);
+  source.connect(state.audio.playbackGain);
+}
+
+function fadePreviewOutputIn(startAt) {
+  const output = state.audio.playbackGain;
+  const context = state.audio.context;
+  if (!output || !context) return;
+  if (armPlaybackGuard(output, PLAYBACK_OUTPUT_FADE_SECONDS)) return;
+  const gain = output.gain;
+  if (!gain) return;
+  const now = context.currentTime;
+  const rampStart = Math.max(now, startAt ?? now);
+  gain.cancelScheduledValues(now);
+  gain.setValueAtTime(0, now);
+  gain.setValueAtTime(0, rampStart);
+  gain.linearRampToValueAtTime(1, rampStart + PLAYBACK_OUTPUT_FADE_SECONDS);
+}
+
+function silencePreviewOutput() {
+  const output = state.audio.playbackGain;
+  const context = state.audio.context;
+  if (!output || !context) return;
+  if (silencePlaybackGuard(output)) return;
+  const gain = output.gain;
+  if (!gain) return;
+  const now = context.currentTime;
+  gain.cancelScheduledValues(now);
+  gain.setValueAtTime(0, now);
+}
+
+function previewGraphLatency() {
+  if (state.ui.referenceActive || state.ui.isBypassed) return 0;
+  const limiter = state.audio.nodes.limiter;
+  const limiterLatency = limiter?.isTruePeakFallback
+    ? GLUE_COMPRESSOR_LATENCY_SECONDS
+    : REALTIME_LIMITER_LATENCY_SECONDS;
+  const compressorLatency = dom.glueCompression.checked
+    ? GLUE_COMPRESSOR_LATENCY_SECONDS
+    : 0;
+  return limiterLatency + compressorLatency;
 }
 
 function connectAudioChain(source) {
@@ -1026,6 +1102,7 @@ async function renderStemSongMix(song, sampleRate = null, allowAudition = true, 
 async function activateAudioBuffer(buffer, metaPrefix = '', { loadRequest = null, startProgress = 42 } = {}) {
   state.file.buffer = buffer;
   state.file.restorationPreviewBuffer = null;
+  state.file.restorationDeltaBuffer = null;
   state.file.restorationReport = null;
   dom.fileMeta.textContent = 'Analyzing loudness...';
 
@@ -1090,6 +1167,7 @@ function referencePlaybackGain() {
 }
 
 async function loadReferenceTrack() {
+  warmPreviewAudio();
   const filePath = await window.electronAPI.selectFile();
   if (!filePath) return;
   if (!AUDIO_FILE_PATTERN.test(filePath)) {
@@ -1102,7 +1180,7 @@ async function loadReferenceTrack() {
     const analysis = measureLUFS(buffer, { truePeak: false });
     const wasPlaying = state.playback.isPlaying;
     const playbackPosition = wasPlaying
-      ? state.audio.context.currentTime - state.playback.startTime
+      ? getAudiblePlaybackPosition()
       : state.playback.pauseTime;
     if (wasPlaying) stopAudio({ preserveSpectrogram: true });
     state.file.reference = {
@@ -1132,7 +1210,7 @@ function toggleReferencePlayback() {
   if (!state.file.reference) return;
   const wasPlaying = state.playback.isPlaying;
   const position = wasPlaying
-    ? state.audio.context.currentTime - state.playback.startTime
+    ? getAudiblePlaybackPosition()
     : state.playback.pauseTime;
   state.ui.referenceActive = !state.ui.referenceActive;
   dom.toggleReference.textContent = state.ui.referenceActive ? 'B: Reference' : 'A: Source';
@@ -1264,6 +1342,7 @@ function updateRestorationPreview() {
   if (!settings.repairEdgeArtifacts && !settings.repairPrematureEnding &&
       !settings.repairVocalCrackle && !settings.noiseReduction) {
     state.file.restorationPreviewBuffer = null;
+    state.file.restorationDeltaBuffer = null;
     state.file.restorationReport = { edgeSamples: 0, impulseSamples: 0, crackleSamples: 0, endingRepaired: false };
     updateRestorationStatus(settings, state.file.restorationReport);
     drawWaveform();
@@ -1279,6 +1358,11 @@ function updateRestorationPreview() {
     );
   }
   state.file.restorationPreviewBuffer = restored.buffer;
+  state.file.restorationDeltaBuffer = createRestorationDeltaBuffer(
+    state.audio.context,
+    state.file.buffer,
+    restored.buffer
+  );
   state.file.restorationReport = report;
   updateRestorationStatus(settings, report);
   drawWaveform();
@@ -1304,6 +1388,19 @@ function removeLiveMasterRestoration(fade = true) {
   } catch (e) { /* audio context was already closed */ }
 }
 
+function createRestorationDeltaBuffer(context, buffer, restoredBuffer) {
+  const delta = context.createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
+  for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+    const original = buffer.getChannelData(channel);
+    const repaired = restoredBuffer.getChannelData(channel);
+    const difference = delta.getChannelData(channel);
+    for (let index = 0; index < difference.length; index++) {
+      difference[index] = repaired[index] - original[index];
+    }
+  }
+  return delta;
+}
+
 function createMasterRestorationDelta(buffer, settings) {
   const context = state.audio.context;
   const restored = createRestoredInputBuffer(context, buffer, settings);
@@ -1315,15 +1412,7 @@ function createMasterRestorationDelta(buffer, settings) {
     );
   }
 
-  const delta = context.createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
-  for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
-    const original = buffer.getChannelData(channel);
-    const repaired = restored.buffer.getChannelData(channel);
-    const difference = delta.getChannelData(channel);
-    for (let index = 0; index < difference.length; index++) {
-      difference[index] = repaired[index] - original[index];
-    }
-  }
+  const delta = createRestorationDeltaBuffer(context, buffer, restored.buffer);
   return { delta, report };
 }
 
@@ -1341,6 +1430,7 @@ async function updateLiveMasterRestorationPreview() {
   if (!settings.repairEdgeArtifacts && !settings.repairPrematureEnding &&
       !settings.repairVocalCrackle && !settings.noiseReduction) {
     removeLiveMasterRestoration();
+    state.file.restorationDeltaBuffer = null;
     updateRestorationStatus(settings, { edgeSamples: 0, impulseSamples: 0, crackleSamples: 0, endingRepaired: false });
     return;
   }
@@ -1356,17 +1446,23 @@ async function updateLiveMasterRestorationPreview() {
       state.file.stemSong !== song ||
       !state.playback.isPlaying ||
       !state.audio.stemMixBus) return;
+  state.file.restorationDeltaBuffer = delta;
 
   const context = state.audio.context;
-  const offset = Math.max(0, context.currentTime - state.playback.startTime);
+  // If the correction layer finishes preparing during the short start guard,
+  // join it at the same scheduled time as the stems. Otherwise start it at
+  // the current song position so it remains sample-aligned with the live mix.
+  const startAt = Math.max(context.currentTime, state.playback.scheduledStartTime || 0);
+  const offset = Math.max(0, startAt - state.playback.startTime);
   if (offset >= delta.duration) return;
   const source = context.createBufferSource();
   const gain = context.createGain();
   source.buffer = delta;
   gain.gain.value = 0;
   source.connect(gain).connect(state.audio.stemMixBus);
-  source.start(0, offset);
-  gain.gain.linearRampToValueAtTime(1, context.currentTime + 0.025);
+  source.start(startAt, offset);
+  gain.gain.setValueAtTime(0, startAt);
+  gain.gain.linearRampToValueAtTime(1, startAt + 0.025);
   const active = { source, gain };
   state.audio.masterRestorationDelta = active;
   source.onended = () => {
@@ -1430,19 +1526,38 @@ function setPlaybackPosition(time) {
   dom.waveformContainer.setAttribute('aria-valuetext', `${formatTime(safeTime)} of ${formatTime(duration || 0)}`);
 }
 
+function getAudiblePlaybackPosition() {
+  const context = state.audio.context;
+  if (!context) return state.playback.pauseTime;
+  const timestamp = context.getOutputTimestamp?.();
+  const outputContextTime = Number.isFinite(timestamp?.contextTime) && timestamp.contextTime > 0
+    ? timestamp.contextTime
+    : context.currentTime - (context.outputLatency || 0);
+  return state.playback.startOffset + Math.max(0, outputContextTime - state.playback.outputStartTime);
+}
+
+function stopSeekUpdate() {
+  if (state.playback.seekInterval !== null) {
+    cancelAnimationFrame(state.playback.seekInterval);
+    state.playback.seekInterval = null;
+  }
+}
+
 function finishPlayback() {
   if (!state.playback.isPlaying) return;
+  silencePreviewOutput();
   state.playback.isPlaying = false;
+  state.playback.scheduledStartTime = 0;
   state.playback.pauseTime = 0;
   dom.playIcon.textContent = '▶';
   setPlaybackPosition(0);
-  clearInterval(state.playback.seekInterval);
+  stopSeekUpdate();
   stopLevelMeters();
 }
 
 function startReferencePlayback(offset) {
   const reference = state.file.reference;
-  if (!reference || offset >= reference.buffer.duration) return false;
+  if (!reference || offset >= reference.buffer.duration) return null;
   state.audio.sourceNode = state.audio.context.createBufferSource();
   state.audio.sourceNode.buffer = reference.buffer;
   state.audio.referenceGain = state.audio.context.createGain();
@@ -1450,8 +1565,9 @@ function startReferencePlayback(offset) {
   state.audio.sourceNode.connect(state.audio.referenceGain);
   connectPreviewOutput(state.audio.referenceGain);
   state.audio.sourceNode.onended = finishPlayback;
-  state.audio.sourceNode.start(0, offset);
-  return true;
+  const startAt = state.audio.context.currentTime + PLAYBACK_START_DELAY_SECONDS;
+  state.audio.sourceNode.start(startAt, offset);
+  return startAt;
 }
 
 function startSingleSourcePlayback(offset) {
@@ -1461,8 +1577,9 @@ function startSingleSourcePlayback(offset) {
     : getPreviewBuffer();
   connectAudioChain(state.audio.sourceNode);
   state.audio.sourceNode.onended = finishPlayback;
-  state.audio.sourceNode.start(0, offset);
-  return true;
+  const startAt = state.audio.context.currentTime + PLAYBACK_START_DELAY_SECONDS;
+  state.audio.sourceNode.start(startAt, offset);
+  return startAt;
 }
 
 function getStemLivePlaybackBuffer(context, stem) {
@@ -1486,7 +1603,7 @@ function getStemLivePlaybackBuffer(context, stem) {
 
 function startLiveStemPlayback(offset) {
   const song = state.file.stemSong;
-  if (!song || !song.stems.every(stem => stem.buffer)) return false;
+  if (!song || !song.stems.every(stem => stem.buffer)) return null;
 
   const context = state.audio.context;
   const mixBus = context.createGain();
@@ -1516,9 +1633,33 @@ function startLiveStemPlayback(offset) {
       remaining--;
       if (remaining === 0) finishPlayback();
     };
-    source.start(0, offset);
   }
-  return remaining > 0;
+  if (remaining === 0) return null;
+
+  // Build the complete stem graph first. Starting every source from the same
+  // future audio time keeps the mix sample-aligned and gives the prior graph
+  // one render quantum to drain before it can reach the shared output.
+  const startAt = context.currentTime + PLAYBACK_START_DELAY_SECONDS;
+  state.audio.stemSourceNodes.forEach(source => source.start(startAt, offset));
+
+  // Song-level restoration is a post-mix correction. Start its precomputed
+  // delta on the exact same audio frame as the stems; adding it later during
+  // playback creates a realtime-only onset transient that exports never have.
+  const delta = state.ui.isBypassed ? null : state.file.restorationDeltaBuffer;
+  if (delta && offset < delta.duration) {
+    const source = context.createBufferSource();
+    const gain = context.createGain();
+    source.buffer = delta;
+    gain.gain.value = 1;
+    source.connect(gain).connect(mixBus);
+    source.start(startAt, offset);
+    const active = { source, gain };
+    state.audio.masterRestorationDelta = active;
+    source.onended = () => {
+      if (state.audio.masterRestorationDelta === active) state.audio.masterRestorationDelta = null;
+    };
+  }
+  return startAt;
 }
 
 function startPlaybackAt(offset) {
@@ -1526,15 +1667,25 @@ function startPlaybackAt(offset) {
   if (state.audio.context.state === 'suspended') state.audio.context.resume();
 
   const liveStems = !state.ui.referenceActive && state.file.stemSong;
-  const started = state.ui.referenceActive
+  if (!state.ui.referenceActive && !state.ui.isBypassed) {
+    resetRealtimeLimiterNode(state.audio.nodes.limiter);
+  }
+  const startAt = state.ui.referenceActive
     ? startReferencePlayback(offset)
     : liveStems ? startLiveStemPlayback(offset) : startSingleSourcePlayback(offset);
-  if (!started) return;
+  if (startAt === null) return;
 
-  state.playback.startTime = state.audio.context.currentTime - offset;
+  // The future start keeps the graph silent while look-ahead processors drain
+  // after a pause or fast A/B switch. The output ramp then handles an input
+  // buffer whose first sample is non-zero without adding a perceptible delay.
+  fadePreviewOutputIn(startAt + previewGraphLatency());
+
+  state.playback.startTime = startAt - offset;
+  state.playback.outputStartTime = startAt + previewGraphLatency();
+  state.playback.startOffset = offset;
+  state.playback.scheduledStartTime = startAt;
   state.playback.isPlaying = true;
   dom.playIcon.textContent = '⏸';
-  if (liveStems && !state.ui.isBypassed) void updateLiveMasterRestorationPreview();
   const preserveSpectrogram = state.meters.preserveSpectrogram;
   startLevelMeters({ preserveSpectrogram });
   startSeekUpdate();
@@ -1550,12 +1701,14 @@ function playAudio() {
 
 function pauseAudio() {
   if (!state.playback.isPlaying) return;
-  state.playback.pauseTime = state.audio.context.currentTime - state.playback.startTime;
+  state.playback.pauseTime = getAudiblePlaybackPosition();
   stopAudio({ preserveSpectrogram: true });
 }
 
 function stopAudio({ preserveSpectrogram = false } = {}) {
   state.audio.restorationPreviewRequest++;
+  silencePreviewOutput();
+  state.playback.scheduledStartTime = 0;
   removeLiveMasterRestoration(false);
   if (state.audio.sourceNode) {
     try {
@@ -1584,17 +1737,17 @@ function stopAudio({ preserveSpectrogram = false } = {}) {
   }
   state.playback.isPlaying = false;
   dom.playIcon.textContent = '▶';
-  clearInterval(state.playback.seekInterval);
+  stopSeekUpdate();
   stopLevelMeters({ clearSpectrogram: !preserveSpectrogram });
   state.meters.preserveSpectrogram = preserveSpectrogram;
 }
 
 function startSeekUpdate() {
-  clearInterval(state.playback.seekInterval);
+  stopSeekUpdate();
 
-  state.playback.seekInterval = setInterval(() => {
+  const update = () => {
     if (state.playback.isPlaying && state.file.buffer && !state.playback.isSeeking) {
-      const currentTime = state.audio.context.currentTime - state.playback.startTime;
+      const currentTime = getAudiblePlaybackPosition();
       const activeDuration = state.ui.referenceActive && state.file.reference
         ? state.file.reference.buffer.duration
         : state.file.duration;
@@ -1606,7 +1759,11 @@ function startSeekUpdate() {
         setPlaybackPosition(currentTime);
       }
     }
-  }, 100);
+    if (state.playback.isPlaying) {
+      state.playback.seekInterval = requestAnimationFrame(update);
+    }
+  };
+  state.playback.seekInterval = requestAnimationFrame(update);
 }
 
 function seekTo(time, { resume = state.playback.isPlaying } = {}) {
@@ -1954,11 +2111,13 @@ function startSpectrogram({ preserve = false } = {}) {
 
 // ─── File Events ────────────────────────────────────────────────────────────
 dom.selectFileBtn.addEventListener('click', async () => {
+  warmPreviewAudio();
   const filePath = await window.electronAPI.selectFile();
   if (filePath) await loadFile(filePath);
 });
 
 dom.changeFileBtn.addEventListener('click', async () => {
+  warmPreviewAudio();
   const filePath = await window.electronAPI.selectFile();
   if (filePath) {
     stopAudio();
@@ -2027,6 +2186,7 @@ dom.dropZone.addEventListener('dragleave', () => {
 dom.dropZone.addEventListener('drop', async (e) => {
   e.preventDefault();
   dom.dropZone.classList.remove('drag-over');
+  warmPreviewAudio();
 
   const file = e.dataTransfer.files[0];
   if (file && (AUDIO_FILE_PATTERN.test(file.name) || SUNO_STEMS_ARCHIVE_PATTERN.test(file.name))) {
@@ -2100,7 +2260,7 @@ dom.waveformContainer.addEventListener('pointercancel', finishWaveformScrub);
 function toggleOriginalPreview() {
   const wasPlaying = state.playback.isPlaying;
   const position = wasPlaying
-    ? Math.max(0, state.audio.context.currentTime - state.playback.startTime)
+    ? getAudiblePlaybackPosition()
     : state.playback.pauseTime;
   state.ui.isBypassed = !state.ui.isBypassed;
   dom.bypassBtn.textContent = state.ui.isBypassed ? '🔇 FX Off • Original' : '🔊 FX On';
@@ -2597,14 +2757,14 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'ArrowLeft' && state.file.buffer) {
     e.preventDefault();
     const currentTime = state.playback.isPlaying
-      ? state.audio.context.currentTime - state.playback.startTime
+      ? getAudiblePlaybackPosition()
       : state.playback.pauseTime;
     seekTo(currentTime - 5);
   }
   if (e.code === 'ArrowRight' && state.file.buffer) {
     e.preventDefault();
     const currentTime = state.playback.isPlaying
-      ? state.audio.context.currentTime - state.playback.startTime
+      ? getAudiblePlaybackPosition()
       : state.playback.pauseTime;
     seekTo(currentTime + 5);
   }

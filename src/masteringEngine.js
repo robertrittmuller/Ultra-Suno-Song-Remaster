@@ -5,6 +5,7 @@ const TRUE_PEAK_WORKLET_URL = new URL('./truePeakLimiter.worklet.js', import.met
 export const MONO_BASS_FREQUENCY = 120;
 export const STEREO_HIGH_CROSSOVER = 4000;
 export const GLUE_COMPRESSOR_LATENCY_SECONDS = 0.006;
+export const REALTIME_LIMITER_LATENCY_SECONDS = 0.005;
 
 export function updateMatchedBypassGain(currentGain, wetEnergy, dryEnergy, smoothing = 0.9) {
   if (!(wetEnergy > 1e-10) || !(dryEnergy > 1e-10)) return currentGain;
@@ -33,6 +34,12 @@ export async function createRealtimeLimiterNode(context) {
   const fallback = context.createDynamicsCompressor();
   fallback.isTruePeakFallback = true;
   return fallback;
+}
+
+export function resetRealtimeLimiterNode(limiter) {
+  if (!limiter?.port) return false;
+  limiter.port.postMessage({ type: 'reset' });
+  return true;
 }
 
 export function createMasteringNodes(context, limiter, options = {}) {
