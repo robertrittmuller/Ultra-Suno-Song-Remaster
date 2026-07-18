@@ -282,6 +282,16 @@
 
       <div class="settings-card">
         <h3>Restoration</h3>
+        <label class="toggle-row" data-tip="Detects a stable repeating delay from 40–450 ms and applies stereo-linked cancellation. Best for slapback and discrete echoes; diffuse room reverb is left alone to protect the mix.">
+          <span>Echo Reduction</span>
+          <input type="checkbox" id="echoReduction" aria-label="Enable analysis-gated echo reduction">
+          <span class="toggle" aria-hidden="true"></span>
+        </label>
+        <div class="slider-row restoration-amount-row" data-tip="Controls how much of the detected repeat is cancelled. Higher values sound drier but can affect intentional delay effects, so audition before export.">
+          <span>Echo Amount</span>
+          <input type="range" id="echoReductionAmount" min="0" max="100" step="1" value="60" aria-label="Echo reduction amount">
+          <span class="slider-value" id="echoReductionAmountValue">60%</span>
+        </div>
         <label class="toggle-row" data-tip="Learns a noise profile from the quietest usable passages, then applies stereo-linked spectral reduction with time/frequency smoothing. Designed for steady hiss, hum, fan, and room noise; audition before export.">
           <span>High-Quality Denoise</span>
           <input type="checkbox" id="noiseReduction" aria-label="Enable high-quality broadband noise reduction">

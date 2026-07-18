@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { reduceBroadbandNoise, repairClicksAndPops } from '../src/audioRestoration.js';
+import { reduceBroadbandNoise, reduceEcho, repairClicksAndPops } from '../src/audioRestoration.js';
 import { sineWave } from './audioTestUtils.js';
 
 const SAMPLE_RATE = 48000;
@@ -144,6 +144,56 @@ function sineAmplitude(samples, frequency, start, end) {
   }
   return 2 * Math.hypot(sine, cosine) / Math.max(1, end - start);
 }
+
+test('echo reduction detects and cancels a stable feedback repeat', () => {
+  const length = SAMPLE_RATE * 2;
+  const dry = seededNoise(length, 424242);
+  const echoed = new Float32Array(length);
+  const delay = Math.round(SAMPLE_RATE * 0.12) + 11;
+  const feedback = 0.42;
+  for (let index = 0; index < length; index++) {
+    dry[index] *= 0.12;
+    echoed[index] = dry[index] + (index >= delay ? echoed[index - delay] * feedback : 0);
+  }
+  const beforeError = new Float32Array(length);
+  for (let index = 0; index < length; index++) beforeError[index] = echoed[index] - dry[index];
+
+  const report = reduceEcho([echoed], SAMPLE_RATE, { amount: 100 });
+  let beforePower = 0;
+  let afterPower = 0;
+  for (let index = delay * 2; index < length; index++) {
+    beforePower += beforeError[index] ** 2;
+    afterPower += (echoed[index] - dry[index]) ** 2;
+  }
+
+  assert.equal(report.echoDetected, true);
+  const expectedDelayMs = delay / SAMPLE_RATE * 1000;
+  assert.ok(
+    Math.abs(report.echoDelayMs - expectedDelayMs) <= 1.5 / SAMPLE_RATE * 1000,
+    `delay was ${report.echoDelayMs} ms`
+  );
+  assert.ok(afterPower < beforePower * 0.08, `residual power ratio was ${afterPower / beforePower}`);
+});
+
+test('echo reduction preserves clean tonal material when no unique repeat exists', () => {
+  const channel = sineWave(SAMPLE_RATE, 1, 440, 0.2, 0.3);
+  const original = new Float32Array(channel);
+
+  const report = reduceEcho([channel], SAMPLE_RATE, { amount: 100 });
+
+  assert.equal(report.echoDetected, false);
+  assert.deepEqual(channel, original);
+});
+
+test('zero echo reduction amount is a sample-identical bypass', () => {
+  const channel = seededNoise(SAMPLE_RATE, 24680);
+  const original = new Float32Array(channel);
+
+  const report = reduceEcho([channel], SAMPLE_RATE, { amount: 0 });
+
+  assert.equal(report.echoDetected, false);
+  assert.deepEqual(channel, original);
+});
 
 test('spectral denoise lowers a learned stationary noise floor while preserving a tone', () => {
   const length = Math.round(SAMPLE_RATE * 1.2);

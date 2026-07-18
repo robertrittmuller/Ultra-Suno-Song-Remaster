@@ -23,6 +23,7 @@ A professional desktop app for mastering AI-generated music to streaming-ready q
 - **Polish Effects** - Cut mud, add air, tame harshness
 - **Analysis-Gated Restoration** - Optional boundary declicking, hard-cut ending repair, and predictive click/pop repair
 - **High-Quality Noise Reduction** - Automatic quiet-passage profiling, stereo-linked spectral reduction, and adjustable artifact-safe smoothing for steady hiss, hum, fan, or room noise
+- **Analysis-Gated Echo Reduction** - Detects and attenuates stable 40–450 ms repeating echoes while bypassing uncertain or diffuse ambience
 - **Real-time Preview** - Hear all changes live before exporting, preview any queued file
 - **Clipping Detection** - Visual CLIP indicators on meters
 - **Album-Relative Normalization** - A two-pass batch mode calculates one shared gain so intentional song-to-song loudness differences are preserved
@@ -58,6 +59,7 @@ card. They are off by default, so a source is never altered unexpectedly.
 - **Repair Cutoff Ending** runs only when the last 50 ms is still audible and has not naturally decayed relative to the preceding audio. It applies a shaped 650 ms release that reaches digital silence without a new click.
 - **Repair Clicks & Pops** targets sparse sub-millisecond impulses with a locally adaptive autoregressive detector. A candidate must disagree with predictions from both the past and future, and sustained musical onsets are vetoed. Only the affected channel is repaired with bounded, bidirectional waveform prediction. A second join-safety check rejects any patch rougher than the nearby clean audio, so a left-only defect cannot alter clean right-channel audio and a repair cannot manufacture a new tick.
 - **High-Quality Denoise** learns a frequency-dependent noise profile from the quietest usable passages, excluding digital silence. It applies a soft Wiener-style gain mask with 50%-overlapped reconstruction plus stereo-linked time and frequency smoothing, preserving imaging while reducing steady hiss, hum, fans, and room noise. The Reduction control trades ambience retention for deeper attenuation.
+- **Echo Reduction** searches for a stable, discrete repeat between 40 and 450 ms, then applies one stereo-linked delayed cancellation filter. It is intended for slapback and clearly repeating echoes. Diffuse room reverb or uncertain detections are bypassed to avoid hollowing out the mix; use the amount control and audition before export.
 
 Continuous high-frequency shimmer, sizzling, or codec-like texture is not treated as a run of clicks. Use High-Quality Denoise for steady noise with a learnable floor; rapidly changing codec artifacts can overlap cymbals, strings, and vocal sibilance, so audition the result before export.
 

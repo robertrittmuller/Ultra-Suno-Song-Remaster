@@ -266,6 +266,171 @@ export function reduceBroadbandNoise(channels, sampleRate, options = {}) {
   };
 }
 
+function createEchoAnalysisSignal(channels, sampleRate) {
+  const analysisRate = 2000;
+  const decimation = Math.max(1, Math.round(sampleRate / analysisRate));
+  const smoothingLength = decimation * 4;
+  const length = Math.max(0, Math.floor((channels[0].length - smoothingLength) / decimation) + 1);
+  let source = channels[0];
+  let sourceEnergy = 0;
+
+  // Analyze the most energetic channel instead of summing to mono. A wide or
+  // polarity-inverted stereo mix can cancel at the center even though the same
+  // echo delay is present in both channels.
+  for (const channel of channels) {
+    let energy = 0;
+    const stride = Math.max(1, Math.floor(channel.length / 20000));
+    for (let index = 0; index < channel.length; index += stride) energy += channel[index] ** 2;
+    if (energy > sourceEnergy) {
+      source = channel;
+      sourceEnergy = energy;
+    }
+  }
+
+  const signal = new Float64Array(length);
+  let previous = 0;
+  for (let frame = 0; frame < length; frame++) {
+    const start = frame * decimation;
+    const end = Math.min(source.length, start + smoothingLength);
+    let average = 0;
+    for (let index = start; index < end; index++) average += source[index];
+    average /= Math.max(1, end - start);
+    // Pre-whitening suppresses sustained notes and emphasizes broadband
+    // detail. A delayed copy remains correlated, while musical pitch is much
+    // less likely to masquerade as a slapback echo.
+    signal[frame] = average - previous * 0.92;
+    previous = average;
+  }
+  return { signal, source, analysisRate: sampleRate / decimation, decimation };
+}
+
+function echoCorrelation(signal, lag, start = lag, end = signal.length, stride = 1) {
+  let cross = 0;
+  let currentEnergy = 0;
+  let delayedEnergy = 0;
+  for (let index = Math.max(lag, start); index < end; index += stride) {
+    const current = signal[index];
+    const delayed = signal[index - lag];
+    cross += current * delayed;
+    currentEnergy += current * current;
+    delayedEnergy += delayed * delayed;
+  }
+  return {
+    correlation: cross / Math.sqrt(Math.max(EPSILON, currentEnergy * delayedEnergy)),
+    coefficient: cross / Math.max(EPSILON, delayedEnergy)
+  };
+}
+
+function fullRateEchoCorrelation(channel, lag, stride) {
+  let cross = 0;
+  let currentEnergy = 0;
+  let delayedEnergy = 0;
+  for (let index = lag + 1; index < channel.length; index += stride) {
+    const current = channel[index] - channel[index - 1] * 0.92;
+    const delayed = channel[index - lag] - channel[index - lag - 1] * 0.92;
+    cross += current * delayed;
+    currentEnergy += current * current;
+    delayedEnergy += delayed * delayed;
+  }
+  return {
+    correlation: cross / Math.sqrt(Math.max(EPSILON, currentEnergy * delayedEnergy)),
+    coefficient: cross / Math.max(EPSILON, delayedEnergy)
+  };
+}
+
+function detectEcho(channels, sampleRate) {
+  const { signal, source, analysisRate, decimation } = createEchoAnalysisSignal(channels, sampleRate);
+  const minimumLag = Math.max(1, Math.round(analysisRate * 0.04));
+  const maximumLag = Math.min(signal.length - 1, Math.round(analysisRate * 0.45));
+  if (maximumLag <= minimumLag || signal.length < analysisRate * 0.8) return null;
+
+  const stride = Math.max(1, Math.floor((signal.length - maximumLag) / 40000));
+  const candidates = [];
+  for (let lag = minimumLag; lag <= maximumLag; lag += 2) {
+    const measured = echoCorrelation(signal, lag, maximumLag, signal.length, stride);
+    candidates.push({ lag, ...measured });
+  }
+  candidates.sort((left, right) => right.correlation - left.correlation);
+  const best = candidates[0];
+  if (!best) return null;
+
+  const correlations = candidates.map(candidate => candidate.correlation);
+  const background = quantile([...correlations], 0.75);
+  const prominence = best.correlation - background;
+  const nearPeakCount = correlations.filter(value => value >= best.correlation * 0.82).length;
+
+  // Tonal sources create many equally strong periodic peaks. A real repeating
+  // echo produces a sparse autocorrelation peak with a stable positive delay.
+  if (best.correlation < 0.14 || prominence < 0.055 || nearPeakCount > 10) return null;
+
+  const blockCount = 6;
+  const blockLength = Math.floor((signal.length - maximumLag) / blockCount);
+  const blockCorrelations = [];
+  for (let block = 0; block < blockCount; block++) {
+    const start = maximumLag + block * blockLength;
+    const end = block === blockCount - 1 ? signal.length : start + blockLength;
+    blockCorrelations.push(echoCorrelation(signal, best.lag, start, end).correlation);
+  }
+  const stableBlocks = blockCorrelations.filter(value => value > Math.max(0.07, best.correlation * 0.38));
+  const consistency = stableBlocks.length / blockCount;
+  if (stableBlocks.length < 4 || median([...blockCorrelations]) < 0.1) return null;
+
+  // The downsampled scan finds the delay cheaply. Refine around that result at
+  // native sample resolution so cancellation stays phase-aligned at high
+  // frequencies instead of being rounded to the nearest analysis frame.
+  const roughDelay = Math.round(best.lag / analysisRate * sampleRate);
+  const refinementStride = Math.max(1, Math.floor(source.length / 80000));
+  let refined = { delay: roughDelay, ...fullRateEchoCorrelation(source, roughDelay, refinementStride) };
+  for (let delay = Math.max(2, roughDelay - decimation); delay <= roughDelay + decimation; delay++) {
+    const measured = fullRateEchoCorrelation(source, delay, refinementStride);
+    if (measured.correlation > refined.correlation) refined = { delay, ...measured };
+  }
+
+  return {
+    delaySamples: refined.delay,
+    coefficient: clamp(refined.coefficient, 0.06, 0.72),
+    confidence: clamp((prominence / 0.2) * consistency, 0, 1)
+  };
+}
+
+/**
+ * Reduces a detected repeating echo with a linked delayed cancellation filter.
+ * Detection uses pre-whitened autocorrelation plus cross-song consistency and
+ * peak-uniqueness gates. Diffuse ambience and uncertain/tonal material are
+ * intentionally bypassed because blind de-reverberation can damage a mix.
+ */
+export function reduceEcho(channels, sampleRate, options = {}) {
+  const amount = clamp(Number(options.amount ?? options.echoReductionAmount ?? 60), 0, 100);
+  const emptyReport = {
+    echoDetected: false,
+    echoDelayMs: 0,
+    echoStrengthDb: -Infinity,
+    echoConfidence: 0
+  };
+  const length = channels[0]?.length || 0;
+  if (!channels.length || !length || amount <= 0 || length < sampleRate * 0.8) return emptyReport;
+
+  const echo = detectEcho(channels, sampleRate);
+  if (!echo || echo.delaySamples <= 0 || echo.delaySamples >= length) return emptyReport;
+
+  const cancellation = echo.coefficient * (amount / 100) * 0.95;
+  const fadeLength = Math.max(1, Math.min(echo.delaySamples, Math.round(sampleRate * 0.02)));
+  for (const channel of channels) {
+    const input = new Float32Array(channel);
+    for (let index = echo.delaySamples; index < length; index++) {
+      const engagement = Math.min(1, (index - echo.delaySamples + 1) / fadeLength);
+      channel[index] = input[index] - input[index - echo.delaySamples] * cancellation * engagement;
+    }
+  }
+
+  return {
+    echoDetected: true,
+    echoDelayMs: echo.delaySamples / sampleRate * 1000,
+    echoStrengthDb: 20 * Math.log10(Math.max(EPSILON, echo.coefficient)),
+    echoConfidence: echo.confidence
+  };
+}
+
 function median(values) {
   if (!values.length) return 0;
   values.sort((a, b) => a - b);
@@ -810,6 +975,10 @@ export function createRestoredInputBuffer(context, inputBuffer, settings) {
     edgeSamples: 0,
     impulseSamples: 0,
     crackleSamples: 0,
+    echoDetected: false,
+    echoDelayMs: 0,
+    echoStrengthDb: -Infinity,
+    echoConfidence: 0,
     noiseReductionDb: 0,
     noiseFloorDb: -Infinity,
     noiseFrames: 0
@@ -818,6 +987,11 @@ export function createRestoredInputBuffer(context, inputBuffer, settings) {
   if (settings.repairVocalCrackle) {
     report.impulseSamples = repairClicksAndPops(channels, inputBuffer.sampleRate);
     report.crackleSamples = report.impulseSamples;
+  }
+  if (settings.echoReduction) {
+    Object.assign(report, reduceEcho(channels, inputBuffer.sampleRate, {
+      amount: settings.echoReductionAmount
+    }));
   }
   if (settings.noiseReduction) {
     Object.assign(report, reduceBroadbandNoise(channels, inputBuffer.sampleRate, {
