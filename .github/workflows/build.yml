@@ -111,11 +111,8 @@ jobs:
             ## What's New in ${{ github.ref_name != '' && startsWith(github.ref, 'refs/tags/') && github.ref_name || steps.pkg.outputs.version }}
 
             ### New Features
-            - **Light/Dark Mode** — Toggle between light and dark themes via the sun/moon button in the top bar
-            - Theme preference persists across restarts via localStorage
-
-            ### Bug Fixes
-            - Fixed spectrogram rendering issue caused by devicePixelRatio canvas scaling mismatch
+            - **Analysis-Gated Echo Reduction** — Detects and attenuates stable, discrete 40–450 ms echoes with a stereo-linked cancellation filter, while bypassing uncertain or diffuse ambience.
+            - **Safer Click & Pop Repair** — Uses bounded bidirectional waveform prediction to repair only validated impulses without changing the unaffected stereo channel.
 
             See the full [changelog](https://github.com/${{ github.repository }}/blob/main/README.md#changelog) for details.
         env:

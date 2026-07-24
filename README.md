@@ -145,6 +145,12 @@ GitHub-download error.
 
 ## Changelog
 
+### v2.0.3
+
+**New Features**
+- Analysis-gated echo reduction detects stable, discrete 40–450 ms repeats and attenuates them with a stereo-linked cancellation filter. Uncertain or diffuse ambience is bypassed to preserve natural reverb.
+- Click and pop repair now uses bounded bidirectional waveform prediction, repairing only validated impulses while vetoing sustained musical onsets and protecting the unaffected stereo channel.
+
 ### v2.0.2
 
 **New Features**
