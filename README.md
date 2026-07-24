@@ -33,7 +33,7 @@ A professional desktop app for mastering AI-generated music to streaming-ready q
 
 ## Download
 
-Get the latest release for your platform:
+Download the latest release from the [GitHub Releases page](https://github.com/robertrittmuller/Ultra-Suno-Song-Remaster/releases/latest). The current release is [v2.0.2](https://github.com/robertrittmuller/Ultra-Suno-Song-Remaster/releases/tag/v2.0.2).
 
 - **Windows** - `.exe` installer
 - **macOS** - `.dmg` disk image  
